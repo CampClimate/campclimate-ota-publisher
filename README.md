@@ -23,6 +23,31 @@ Das sollte nur lokal und bewusst als Fallback genutzt werden.
 
 ## Nutzung
 
+### GUI
+
+Fuer den einfachen Release-Alltag gibt es jetzt auch eine GUI:
+
+```bash
+/usr/local/bin/python3 "/Users/bastian-gt/Documents/PlatformIO/Projects/CampClimate OTA Publisher/publisher_gui.py"
+```
+
+Oder per Doppelklick:
+
+`CampClimate OTA Publisher.command`
+
+Die GUI kann:
+
+- `Basic` oder `Central` als OTA-Target waehlen
+- eine `Release-Art` setzen
+- Version, Bezeichnung / Notes und `mandatory` pflegen
+- eine vorhandene `.bin` verwenden
+- oder die aktuelle Produktions-Firmware frisch aus den Sources bauen
+  - `Basic V2.0` via `basic-v2`
+  - `Central 2.0` via `central-production`
+- danach den vorhandenen Upload-Prozess nach Supabase ausfuehren
+
+### Terminal
+
 1. Firmware-`.bin` in `drop/` legen
 2. Im Terminal in diesen Ordner wechseln
 3. Tool starten:

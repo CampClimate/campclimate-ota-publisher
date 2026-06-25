@@ -19,6 +19,9 @@ ROOT = Path(__file__).resolve().parent
 DROP_DIR = ROOT / "drop"
 ARCHIVE_DIR = ROOT / "archive"
 ENV_FILE = ROOT / "env"
+DEFAULT_HTTP_TIMEOUT = 120
+DEFAULT_HTTP_RETRIES = 3
+DEFAULT_UPLOAD_TIMEOUT = 300
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -126,10 +129,31 @@ def slugify(text: str) -> str:
     return slug.strip("-")
 
 
+def make_public_url(supabase_url: str, bucket: str, object_path: str) -> str:
+    return f"{supabase_url}/storage/v1/object/public/{bucket}/{urllib.parse.quote(object_path, safe='/')}"
+
+
+def make_drop_filename(target: str, version: str) -> str:
+    safe_target = slugify(target)
+    safe_version = slugify(version)
+    prefix = safe_target.capitalize() if safe_target else "Firmware"
+    suffix = safe_version or "unknown"
+    return f"{prefix}_{suffix}.bin"
+
+
+def stage_bin_copy(source_path: Path, target: str, version: str) -> Path:
+    DROP_DIR.mkdir(parents=True, exist_ok=True)
+    destination = DROP_DIR / make_drop_filename(target, version)
+    shutil.copy2(source_path, destination)
+    return destination
+
+
 def request_json(method: str,
                  url: str,
                  headers: dict[str, str],
-                 data: bytes | None = None) -> tuple[int, str]:
+                 data: bytes | None = None,
+                 timeout: int = DEFAULT_HTTP_TIMEOUT,
+                 retries: int = DEFAULT_HTTP_RETRIES) -> tuple[int, str]:
     request = urllib.request.Request(url=url, data=data, method=method)
     for key, value in headers.items():
         request.add_header(key, value)
@@ -141,15 +165,32 @@ def request_json(method: str,
     if insecure_ssl:
         ssl_context = ssl._create_unverified_context()
 
-    try:
-        with urllib.request.urlopen(request, timeout=30, context=ssl_context) as response:
-            body = response.read().decode("utf-8", errors="replace")
-            return response.status, body
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code} fuer {url}: {body}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Netzwerkfehler fuer {url}: {exc.reason}") from exc
+    attempts = max(retries, 1)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout, context=ssl_context) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                return response.status, body
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"HTTP {exc.code} fuer {url}: {body}") from exc
+        except TimeoutError as exc:
+            last_error = exc
+            if attempt == attempts:
+                break
+            print(f"Timeout beim Request, neuer Versuch {attempt + 1}/{attempts} ...")
+        except urllib.error.URLError as exc:
+            last_error = exc
+            if attempt == attempts:
+                break
+            print(f"Netzwerkfehler beim Request, neuer Versuch {attempt + 1}/{attempts} ...")
+
+    if isinstance(last_error, urllib.error.URLError):
+        raise RuntimeError(f"Netzwerkfehler fuer {url}: {last_error.reason}") from last_error
+    if last_error is not None:
+        raise RuntimeError(f"Timeout/Verbindungsfehler fuer {url}: {last_error}") from last_error
+    raise RuntimeError(f"Unbekannter Fehler fuer {url}")
 
 
 def upload_file(supabase_url: str,
@@ -166,7 +207,9 @@ def upload_file(supabase_url: str,
         "Content-Type": "application/octet-stream",
         "x-upsert": "true",
     }
-    request_json("POST", url, headers, data)
+    upload_timeout = int(env_value("SUPABASE_UPLOAD_TIMEOUT", str(DEFAULT_UPLOAD_TIMEOUT)) or DEFAULT_UPLOAD_TIMEOUT)
+    print(f"Upload-Timeout: {upload_timeout} Sekunden")
+    request_json("POST", url, headers, data, timeout=upload_timeout)
 
 
 def upsert_release(supabase_url: str,
@@ -242,6 +285,73 @@ def ensure_setup() -> tuple[str, str, str]:
     return supabase_url.rstrip("/"), service_role_key, bucket.strip()
 
 
+def build_release_summary(
+    supabase_url: str,
+    bucket: str,
+    file_path: Path,
+    target: str,
+    version: str,
+    notes: str,
+    mandatory: bool,
+) -> dict[str, object]:
+    file_size = file_path.stat().st_size
+    safe_target = slugify(target)
+    safe_version = slugify(version)
+    object_path = f"{safe_target}/{safe_version}/{file_path.name}"
+    storage_path = f"{bucket}/{object_path}"
+    public_url = make_public_url(supabase_url, bucket, object_path)
+    sha256 = sha256_of_file(file_path)
+    return {
+        "file_path": file_path,
+        "file_name": file_path.name,
+        "target": target,
+        "version": version,
+        "notes": notes,
+        "mandatory": mandatory,
+        "file_size": file_size,
+        "sha256": sha256,
+        "object_path": object_path,
+        "storage_path": storage_path,
+        "public_url": public_url,
+    }
+
+
+def publish_release(
+    file_path: Path,
+    target: str,
+    version: str,
+    notes: str,
+    mandatory: bool,
+) -> dict[str, object]:
+    supabase_url, service_role_key, bucket = ensure_setup()
+    summary = build_release_summary(
+        supabase_url=supabase_url,
+        bucket=bucket,
+        file_path=file_path,
+        target=target,
+        version=version,
+        notes=notes,
+        mandatory=mandatory,
+    )
+
+    upload_file(supabase_url, service_role_key, bucket, str(summary["object_path"]), file_path)
+    release = upsert_release(
+        supabase_url=supabase_url,
+        service_role_key=service_role_key,
+        target=target,
+        version=version,
+        notes=notes,
+        storage_path=str(summary["storage_path"]),
+        file_size_bytes=int(summary["file_size"]),
+        sha256=str(summary["sha256"]),
+        mandatory=mandatory,
+    )
+    archived_path = archive_uploaded_file(file_path, slugify(version))
+    summary["release"] = release
+    summary["archived_path"] = archived_path
+    return summary
+
+
 def main() -> int:
     print("CampClimate OTA Publisher")
     print("-------------------------")
@@ -258,7 +368,6 @@ def main() -> int:
         return 1
 
     file_path = choose_file(bin_files)
-    file_size = file_path.stat().st_size
     inferred_target = infer_target(file_path.name)
     inferred_version = infer_version(file_path.name)
 
@@ -275,24 +384,27 @@ def main() -> int:
     notes = prompt("Bezeichnung / Notes", f"{target} {version}")
     mandatory = prompt_bool("Mandatory Update", False)
 
-    safe_target = slugify(target)
-    safe_version = slugify(version)
-    object_path = f"{safe_target}/{safe_version}/{file_path.name}"
-    storage_path = f"{bucket}/{object_path}"
-    public_url = f"{supabase_url}/storage/v1/object/public/{bucket}/{urllib.parse.quote(object_path, safe='/')}"
-    sha256 = sha256_of_file(file_path)
+    summary = build_release_summary(
+        supabase_url=supabase_url,
+        bucket=bucket,
+        file_path=file_path,
+        target=target,
+        version=version,
+        notes=notes,
+        mandatory=mandatory,
+    )
 
     print()
     print("Zusammenfassung")
-    print(f"  Datei:        {file_path.name}")
-    print(f"  Target:       {target}")
-    print(f"  Version:      {version}")
-    print(f"  Notes:        {notes}")
-    print(f"  Mandatory:    {mandatory}")
-    print(f"  Dateigroesse: {file_size} Bytes")
-    print(f"  SHA256:       {sha256}")
-    print(f"  Storage-Pfad: {storage_path}")
-    print(f"  Public URL:   {public_url}")
+    print(f"  Datei:        {summary['file_name']}")
+    print(f"  Target:       {summary['target']}")
+    print(f"  Version:      {summary['version']}")
+    print(f"  Notes:        {summary['notes']}")
+    print(f"  Mandatory:    {summary['mandatory']}")
+    print(f"  Dateigroesse: {summary['file_size']} Bytes")
+    print(f"  SHA256:       {summary['sha256']}")
+    print(f"  Storage-Pfad: {summary['storage_path']}")
+    print(f"  Public URL:   {summary['public_url']}")
     print()
 
     if not prompt_bool("Jetzt veroeffentlichen", True):
@@ -301,32 +413,23 @@ def main() -> int:
 
     try:
         print("Upload nach Supabase Storage...")
-        upload_file(supabase_url, service_role_key, bucket, object_path, file_path)
-
-        print("Release in firmware_releases speichern...")
-        release = upsert_release(
-            supabase_url=supabase_url,
-            service_role_key=service_role_key,
+        result = publish_release(
+            file_path=file_path,
             target=target,
             version=version,
             notes=notes,
-            storage_path=storage_path,
-            file_size_bytes=file_size,
-            sha256=sha256,
             mandatory=mandatory,
         )
-
-        archived_path = archive_uploaded_file(file_path, safe_version)
     except RuntimeError as exc:
         print(f"Fehler: {exc}")
         return 1
 
     print()
     print("Fertig.")
-    print(f"  Release-ID:   {release.get('id', '')}")
-    print(f"  Storage-Pfad: {storage_path}")
-    print(f"  Public URL:   {public_url}")
-    print(f"  Archiviert:   {archived_path}")
+    print(f"  Release-ID:   {result['release'].get('id', '')}")
+    print(f"  Storage-Pfad: {result['storage_path']}")
+    print(f"  Public URL:   {result['public_url']}")
+    print(f"  Archiviert:   {result['archived_path']}")
     return 0
 
 
