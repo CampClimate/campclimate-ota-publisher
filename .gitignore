@@ -1,6 +1,10 @@
 env
 __pycache__/
 .DS_Store
+*.pyc
+*-private.pem
+private-key*
+keys/
 
 drop/*
 !drop/.gitkeep

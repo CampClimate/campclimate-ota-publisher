@@ -79,6 +79,7 @@ class PublisherGui:
         self.mode_var = tk.StringVar(value="existing")
         self.release_type_var = tk.StringVar(value="production")
         self.version_var = tk.StringVar(value="")
+        self.release_sequence_var = tk.StringVar(value="")
         self.notes_var = tk.StringVar(value="")
         self.mandatory_var = tk.BooleanVar(value=False)
         self.file_var = tk.StringVar(value="")
@@ -151,6 +152,15 @@ class PublisherGui:
         self.mandatory_check = ttk.Checkbutton(form, text="Mandatory Update", variable=self.mandatory_var)
         self.mandatory_check.grid(row=3, column=0, sticky="w", pady=(12, 0))
 
+        ttk.Label(form, text="Release-Sequenz").grid(
+            row=3, column=2, sticky="w", padx=(18, 0), pady=(12, 0)
+        )
+        self.release_sequence_entry = ttk.Entry(
+            form,
+            textvariable=self.release_sequence_var,
+        )
+        self.release_sequence_entry.grid(row=3, column=3, sticky="ew", pady=(12, 0))
+
         ttk.Label(form, text="BIN-Datei").grid(row=4, column=0, sticky="w", pady=(12, 0))
         file_box = ttk.Frame(form)
         file_box.grid(row=4, column=1, columnspan=3, sticky="ew", pady=(12, 0))
@@ -212,6 +222,8 @@ class PublisherGui:
         version = detect_source_version(self.target_var.get())
         if version:
             self.version_var.set(version)
+        sequence = publisher.default_release_sequence(self.target_var.get())
+        self.release_sequence_var.set(sequence)
         self.apply_release_type_preset()
         if self.mode_var.get() == "existing" and not self.file_var.get():
             bins = publisher.discover_bin_files()
@@ -277,11 +289,13 @@ class PublisherGui:
             raise RuntimeError(f"Build erfolgreich, aber Firmware nicht gefunden: {firmware_path}")
         return firmware_path
 
-    def validate_inputs(self) -> tuple[str, str, str, bool]:
+    def validate_inputs(self) -> tuple[str, str, str, bool, int | None]:
         target = self.target_var.get().strip()
         version = self.version_var.get().strip()
         notes = self.notes_var.get().strip()
         mandatory = bool(self.mandatory_var.get())
+        sequence_text = self.release_sequence_var.get().strip()
+        release_sequence: int | None = None
 
         if target not in TARGET_CONFIGS:
             raise RuntimeError("Bitte Basic oder Central auswaehlen.")
@@ -289,13 +303,36 @@ class PublisherGui:
             raise RuntimeError("Version darf nicht leer sein.")
         if not notes:
             raise RuntimeError("Bezeichnung / Notes darf nicht leer sein.")
-        return target, version, notes, mandatory
+        if sequence_text:
+            try:
+                release_sequence = int(sequence_text)
+            except ValueError as exc:
+                raise RuntimeError("Release-Sequenz muss eine ganze Zahl sein.") from exc
+            if release_sequence < 1:
+                raise RuntimeError("Release-Sequenz muss groesser oder gleich 1 sein.")
+        if publisher.signing_mode() == publisher.SIGNING_MODE_REQUIRED and release_sequence is None:
+            raise RuntimeError("Fuer signierte Releases ist die Release-Sequenz Pflicht.")
+        if (
+            publisher.signing_mode() == publisher.SIGNING_MODE_REQUIRED
+            and self.mode_var.get() == "build"
+        ):
+            source_version = detect_source_version(target)
+            if not source_version:
+                raise RuntimeError(
+                    "Die Firmware-Version konnte nicht sicher aus den Sources gelesen werden."
+                )
+            if source_version != version:
+                raise RuntimeError(
+                    f"Eingegebene Version {version} stimmt nicht mit der Source-Version "
+                    f"{source_version} ueberein."
+                )
+        return target, version, notes, mandatory, release_sequence
 
     def start_publish(self) -> None:
         if self.worker_thread and self.worker_thread.is_alive():
             return
         try:
-            target, version, notes, mandatory = self.validate_inputs()
+            target, version, notes, mandatory, release_sequence = self.validate_inputs()
         except RuntimeError as exc:
             messagebox.showerror("Fehlende Angaben", str(exc))
             return
@@ -307,14 +344,29 @@ class PublisherGui:
 
         self.worker_thread = threading.Thread(
             target=self.publish_worker,
-            args=(target, version, notes, mandatory),
+            args=(
+                target,
+                version,
+                notes,
+                mandatory,
+                release_sequence,
+                self.mode_var.get(),
+            ),
             daemon=True,
         )
         self.worker_thread.start()
 
-    def publish_worker(self, target: str, version: str, notes: str, mandatory: bool) -> None:
+    def publish_worker(
+        self,
+        target: str,
+        version: str,
+        notes: str,
+        mandatory: bool,
+        release_sequence: int | None,
+        artifact_origin: str,
+    ) -> None:
         try:
-            if self.mode_var.get() == "build":
+            if artifact_origin == "build":
                 self.event_queue.put(("status", f"{TARGET_CONFIGS[target]['label']} wird aus den aktuellen Quellen gebaut..."))
                 source_bin = self.build_firmware(target)
                 self.event_queue.put(("log", f"Build-Artefakt: {source_bin}\n"))
@@ -329,15 +381,15 @@ class PublisherGui:
             staged_bin = publisher.stage_bin_copy(source_bin, target, version)
             self.event_queue.put(("log", f"Stage in drop/: {staged_bin}\n"))
 
-            supabase_url, _service_role_key, bucket = publisher.ensure_setup()
-            summary = publisher.build_release_summary(
-                supabase_url=supabase_url,
-                bucket=bucket,
+            self.event_queue.put(("status", "Firmware-Manifest wird vorbereitet und geprueft..."))
+            summary = publisher.prepare_release(
                 file_path=staged_bin,
                 target=target,
                 version=version,
                 notes=notes,
                 mandatory=mandatory,
+                release_sequence=release_sequence,
+                artifact_origin=artifact_origin,
             )
             self.event_queue.put(("log", "Zusammenfassung:\n"))
             self.event_queue.put(("log", f"  Datei: {summary['file_name']}\n"))
@@ -347,15 +399,24 @@ class PublisherGui:
             self.event_queue.put(("log", f"  Mandatory: {summary['mandatory']}\n"))
             self.event_queue.put(("log", f"  SHA256: {summary['sha256']}\n"))
             self.event_queue.put(("log", f"  Public URL: {summary['public_url']}\n"))
+            if summary["signed"]:
+                self.event_queue.put(
+                    ("log", f"  Signatur: {summary['signature_algorithm']}\n")
+                )
+                self.event_queue.put(("log", f"  Key-ID: {summary['signing_key_id']}\n"))
+                self.event_queue.put(
+                    ("log", f"  Release-Sequenz: {summary['release_sequence']}\n")
+                )
+                self.event_queue.put(
+                    ("log", f"  Key-Fingerprint: {summary['public_key_fingerprint']}\n")
+                )
+            else:
+                self.event_queue.put(
+                    ("log", "  Signatur: DEAKTIVIERT (Legacy-/Vorbereitungsmodus)\n")
+                )
             self.event_queue.put(("status", "Upload nach Supabase laeuft..."))
 
-            result = publisher.publish_release(
-                file_path=staged_bin,
-                target=target,
-                version=version,
-                notes=notes,
-                mandatory=mandatory,
-            )
+            result = publisher.publish_prepared_release(summary)
             release = result["release"]
             success_text = (
                 f"Release erfolgreich veroeffentlicht. "
@@ -363,6 +424,9 @@ class PublisherGui:
             )
             self.event_queue.put(("success", success_text))
             self.event_queue.put(("log", f"Archiviert: {result['archived_path']}\n"))
+            self.event_queue.put(
+                ("log", f"Release-Akte: {result['release_record_path']}\n")
+            )
         except Exception as exc:
             self.event_queue.put(("error", str(exc)))
         finally:
