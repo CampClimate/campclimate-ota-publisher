@@ -60,11 +60,17 @@ Application-Level-Anti-Rollback ist die erste Stufe. Hardware Secure Boot,
 Flash Encryption und eFuse-Anti-Rollback bleiben eine spaetere
 Produktionshaertung.
 
-Vor Freigabe fuer Kunden muss die Sequenz auch in der Firmware selbst enthalten
-sein. Der Publisher muss dann pruefen, dass Eingabe, Source und BIN denselben
-Wert tragen. Die aktuelle Publisher-Vorbereitung nimmt die Sequenz noch als
-Operator-Eingabe beziehungsweise aus `env`, prueft sie aber bereits gegen die
-hoechste in Supabase vorhandene signierte Sequenz desselben Targets.
+Die Sequenz ist im Firmware-BIN enthalten. Produktionsbuilds enthalten genau
+eine Marke:
+
+```text
+CCFWSEQ1<little-endian uint64 release_sequence>
+```
+
+Der Publisher setzt `CAMPCLIMATE_RELEASE_SEQUENCE` beim Build und verweigert
+die Signatur, wenn Marke oder Wert nicht exakt passen. Zusaetzlich wird die
+Sequenz gegen den hoechsten signierten Supabase-Stand desselben Targets
+geprueft.
 
 ## Schluesselmodell
 
@@ -80,7 +86,7 @@ hoechste in Supabase vorhandene signierte Sequenz desselben Targets.
 ### Oeffentlicher Schluessel
 
 - darf in Git liegen
-- wird spaeter in Basic, Central und beide Factory-Installer eingebaut
+- ist in Basic, Central und beide Factory-Installer eingebaut
 - wird ueber `signing_key_id` ausgewaehlt
 - darf waehrend einer Rotation parallel zu einem Folgeschluessel vertraut werden
 
@@ -99,21 +105,23 @@ Test- und Produktionsschluessel muessen getrennt bleiben.
 Im Modus `OTA_SIGNING_MODE=required`:
 
 1. Produktionsfirmware frisch aus den Sources bauen.
-2. Dateigroesse und SHA256 bestimmen.
-3. kanonisches Manifest erzeugen.
-4. Passphrase aus dem macOS-Schluesselbund lesen.
-5. Manifest mit dem privaten Schluessel signieren.
-6. Signatur sofort mit dem konfigurierten oeffentlichen Schluessel pruefen.
-7. vor dem Upload Datei erneut auf Groesse und SHA256 pruefen.
-8. Firmware unter
+2. Release-Sequenz als Build-Metadatum injizieren.
+3. eindeutige BIN-Marke und eingebetteten Sequenzwert pruefen.
+4. Dateigroesse und SHA256 bestimmen.
+5. kanonisches Manifest erzeugen.
+6. Passphrase aus dem macOS-Schluesselbund lesen.
+7. Manifest mit dem privaten Schluessel signieren.
+8. Signatur sofort mit dem konfigurierten oeffentlichen Schluessel pruefen.
+9. vor dem Upload Datei erneut auf Groesse und SHA256 pruefen.
+10. Firmware unter
    `<target>/sha256/<firmware-sha256>.bin` ohne Upsert hochladen.
-9. das vollstaendige Storage-Objekt zuruecklesen und Groesse sowie SHA256
+11. das vollstaendige Storage-Objekt zuruecklesen und Groesse sowie SHA256
    erneut pruefen.
-10. Release-Datensatz mit `published=false` neu einfuegen.
-11. den unveroeffentlichten Datensatz aus Supabase zuruecklesen und alle
+12. Release-Datensatz mit `published=false` neu einfuegen.
+13. den unveroeffentlichten Datensatz aus Supabase zuruecklesen und alle
     Identitaets- und Signaturfelder vergleichen.
-12. erst danach exakt diesen Datensatz auf `published=true` setzen.
-13. lokale Release-Akte neben dem archivierten BIN speichern.
+14. erst danach exakt diesen Datensatz auf `published=true` setzen.
+15. lokale Release-Akte neben dem archivierten BIN speichern.
 
 Ein vorhandenes beliebiges BIN wird im Pflichtmodus standardmaessig abgelehnt.
 Der kontrollierte Ausnahmeweg `OTA_ALLOW_EXISTING_SIGNED_BIN=1` ist kein
@@ -134,9 +142,9 @@ Die Migration ist additiv. Alle 52 bestehenden Releases bleiben lesbar.
 Signaturfelder sind per Constraint entweder vollstaendig gesetzt oder
 vollstaendig leer. Release-Sequenzen sind pro Target eindeutig.
 
-Der Publisher verhindert zusaetzlich normale Rueckwaertssequenzen bereits vor
-dem Upload. Fuer den spaeteren Mehrprozess- oder CI-Betrieb bleibt ein
-serverseitig atomarer Monotonie-Guard als weitere Supabase-Haertung vorgesehen.
+Der Publisher verhindert Rueckwaertssequenzen bereits vor dem Upload.
+Supabase erzwingt die Monotonie zusaetzlich atomar ueber den internen
+Sequenzkopf.
 
 ## Bestandsgeraete und Bridge-Release
 
@@ -158,13 +166,16 @@ Fuer sehr lange offline gebliebene Geraete darf ein spaeterer Legacy-Endpunkt
 nur genau die festgelegte Bridge-Version ausliefern, niemals eine frei
 waehlbare URL oder beliebige Firmware.
 
-## Noch nicht durch diese Publisher-Phase geloest
+## Umgesetzter Runtime-Vertrag
 
-- Signaturpruefung in Central-OTA
-- Signaturpruefung in Basic-OTA
-- Signaturpruefung in Central- und Basic-Factory-Installer
-- Uebergabe der Signaturmetadaten von Central an Basic
-- automatischer Abgleich der Release-Sequenz mit Source und BIN
-- serverseitig atomare Monotonie-Pruefung fuer parallele Publisher
-- Command-Vertrag ausschliesslich ueber serverseitig validierte Release-ID
+- Central und Basic pruefen die ECDSA-Signatur.
+- Beide Factory-Installer pruefen denselben Vertrag.
+- Central uebergibt die Metadaten ueber authentisierte OTA-v2-Pakete.
+- Cloud-Commands enthalten nur die Release-ID.
+- Central und Basic speichern einen persistenten Anti-Rollback-Stand.
+
+Noch offen:
+
+- erste signierte Bridge-Releases veroeffentlichen und auf Hardware testen
+- OTA-Audit-Log
 - Hardware Secure Boot, Flash Encryption und eFuse-Anti-Rollback

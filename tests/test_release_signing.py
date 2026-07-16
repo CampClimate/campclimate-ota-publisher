@@ -174,7 +174,11 @@ class ReleaseSigningTests(unittest.TestCase):
 
     def test_publisher_prepares_signed_release_and_detects_tampering(self) -> None:
         firmware = self.root / "firmware.bin"
-        firmware.write_bytes(b"CampClimate signed firmware test")
+        firmware.write_bytes(
+            b"CampClimate signed firmware test"
+            + publisher.RELEASE_SEQUENCE_MARKER
+            + (10).to_bytes(8, "little")
+        )
         environment = {
             "SUPABASE_URL": "https://example.supabase.co",
             "SUPABASE_SERVICE_ROLE_KEY": "test-service-role",
@@ -199,6 +203,7 @@ class ReleaseSigningTests(unittest.TestCase):
             )
         self.assertTrue(summary["signed"])
         self.assertEqual(summary["signing_key_id"], self.key_id)
+        self.assertEqual(summary["embedded_release_sequence"], 10)
 
         tampered_summary = dict(summary)
         original_signature = str(tampered_summary["signature_base64"])
@@ -234,6 +239,46 @@ class ReleaseSigningTests(unittest.TestCase):
                     mandatory=False,
                     release_sequence=10,
                     artifact_origin="existing",
+                )
+
+    def test_signed_release_rejects_missing_or_mismatched_binary_sequence(self) -> None:
+        environment = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "test-service-role",
+            "OTA_SIGNING_MODE": "required",
+            "OTA_SIGNING_PRIVATE_KEY": str(self.private_key),
+            "OTA_SIGNING_PUBLIC_KEY": str(self.public_key),
+            "OTA_SIGNING_KEY_ID": self.key_id,
+        }
+        missing = self.root / "missing-marker.bin"
+        missing.write_bytes(b"firmware without build identity")
+        mismatched = self.root / "mismatched-marker.bin"
+        mismatched.write_bytes(
+            b"firmware"
+            + publisher.RELEASE_SEQUENCE_MARKER
+            + (9).to_bytes(8, "little")
+        )
+
+        with mock.patch.dict(os.environ, environment, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "genau eine"):
+                publisher.prepare_release(
+                    file_path=missing,
+                    target="central",
+                    version="2.0.1.10",
+                    notes="Test",
+                    mandatory=False,
+                    release_sequence=10,
+                    artifact_origin="build",
+                )
+            with self.assertRaisesRegex(RuntimeError, "BIN=9"):
+                publisher.prepare_release(
+                    file_path=mismatched,
+                    target="central",
+                    version="2.0.1.10",
+                    notes="Test",
+                    mandatory=False,
+                    release_sequence=10,
+                    artifact_origin="build",
                 )
 
     def test_key_tool_generates_encrypted_pair_outside_repository(self) -> None:

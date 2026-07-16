@@ -256,7 +256,7 @@ class PublisherGui:
         if file_path:
             self.file_var.set(file_path)
 
-    def build_firmware(self, target: str) -> Path:
+    def build_firmware(self, target: str, release_sequence: int | None) -> Path:
         config = TARGET_CONFIGS[target]
         if not PLATFORMIO_BIN.exists():
             raise RuntimeError(f"PlatformIO wurde nicht gefunden: {PLATFORMIO_BIN}")
@@ -266,6 +266,10 @@ class PublisherGui:
         cmd = [str(PLATFORMIO_BIN), "run", "-d", str(config["project_dir"]), "-e", str(config["env"])]
         build_env = os.environ.copy()
         build_env["PLATFORMIO_BUILD_DIR"] = str(config["build_dir"])
+        if release_sequence is not None:
+            build_env["CAMPCLIMATE_RELEASE_SEQUENCE"] = str(release_sequence)
+        if publisher.signing_mode() == publisher.SIGNING_MODE_REQUIRED:
+            build_env["CAMPCLIMATE_REQUIRE_RELEASE_SEQUENCE"] = "1"
         self.event_queue.put(("log", f"$ {' '.join(cmd)}\n"))
         self.current_process = subprocess.Popen(
             cmd,
@@ -368,7 +372,7 @@ class PublisherGui:
         try:
             if artifact_origin == "build":
                 self.event_queue.put(("status", f"{TARGET_CONFIGS[target]['label']} wird aus den aktuellen Quellen gebaut..."))
-                source_bin = self.build_firmware(target)
+                source_bin = self.build_firmware(target, release_sequence)
                 self.event_queue.put(("log", f"Build-Artefakt: {source_bin}\n"))
             else:
                 file_value = self.file_var.get().strip()
@@ -406,6 +410,9 @@ class PublisherGui:
                 self.event_queue.put(("log", f"  Key-ID: {summary['signing_key_id']}\n"))
                 self.event_queue.put(
                     ("log", f"  Release-Sequenz: {summary['release_sequence']}\n")
+                )
+                self.event_queue.put(
+                    ("log", f"  BIN-Sequenz: {summary['embedded_release_sequence']}\n")
                 )
                 self.event_queue.put(
                     ("log", f"  Key-Fingerprint: {summary['public_key_fingerprint']}\n")

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import ssl
+import struct
 import sys
 import urllib.error
 import urllib.parse
@@ -39,6 +40,8 @@ DEFAULT_HTTP_RETRIES = 3
 DEFAULT_UPLOAD_TIMEOUT = 300
 SIGNING_MODE_DISABLED = "disabled"
 SIGNING_MODE_REQUIRED = "required"
+RELEASE_SEQUENCE_MARKER = b"CCFWSEQ1"
+RELEASE_SEQUENCE_BYTES = 8
 RELEASE_SELECT_FIELDS = (
     "id,target,version,notes,storage_path,file_size_bytes,sha256,mandatory,"
     "published,manifest_version,signature_algorithm,signing_key_id,"
@@ -169,6 +172,40 @@ def sha256_of_file(path: Path) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def embedded_release_sequence(path: Path) -> int:
+    data = path.read_bytes()
+    offsets: list[int] = []
+    start = 0
+    while True:
+        offset = data.find(RELEASE_SEQUENCE_MARKER, start)
+        if offset < 0:
+            break
+        offsets.append(offset)
+        start = offset + 1
+
+    if len(offsets) != 1:
+        raise RuntimeError(
+            "Das Firmware-BIN muss genau eine CampClimate-Release-Sequenzmarke "
+            f"enthalten; gefunden: {len(offsets)}."
+        )
+
+    value_offset = offsets[0] + len(RELEASE_SEQUENCE_MARKER)
+    value_end = value_offset + RELEASE_SEQUENCE_BYTES
+    if value_end > len(data):
+        raise RuntimeError("Die eingebettete Release-Sequenz im Firmware-BIN ist unvollstaendig.")
+    return struct.unpack_from("<Q", data, value_offset)[0]
+
+
+def assert_embedded_release_sequence(path: Path, expected_sequence: int) -> int:
+    actual_sequence = embedded_release_sequence(path)
+    if actual_sequence != expected_sequence:
+        raise RuntimeError(
+            "Die eingebettete Release-Sequenz des Firmware-BIN passt nicht zur "
+            f"Publisher-Eingabe: BIN={actual_sequence}, Eingabe={expected_sequence}."
+        )
+    return actual_sequence
 
 
 def slugify(text: str) -> str:
@@ -647,6 +684,10 @@ def prepare_release(
         raise RuntimeError(
             "Fuer ein signiertes Release fehlt die monotone Release-Sequenz."
         )
+    summary["embedded_release_sequence"] = assert_embedded_release_sequence(
+        file_path,
+        release_sequence,
+    )
 
     try:
         config = signing_config_from_values(env_value)

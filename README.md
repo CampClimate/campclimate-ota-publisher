@@ -20,18 +20,16 @@ Kleines lokales Python-Tool, das eine Firmware-`.bin` aus dem `drop`-Ordner nimm
 3. Sicherstellen, dass das Supabase-Schema einschliesslich
    `firmware_release_signing_phase1.sql` eingespielt wurde
 
-Die Signaturvorbereitung ist in
+Der Signaturvertrag ist in
 [`docs/ota_release_signing_v1.md`](docs/ota_release_signing_v1.md)
-vollstaendig beschrieben. Bis die additive Supabase-Migration eingespielt und
-der Produktionsschluessel eingerichtet ist, bleibt:
+vollstaendig beschrieben. Der Produktionsbetrieb verwendet:
 
 ```text
-OTA_SIGNING_MODE=disabled
+OTA_SIGNING_MODE=required
 ```
 
-Der Produktionsschluessel und die Supabase-Spalten sind vorbereitet.
-`OTA_SIGNING_MODE` bleibt trotzdem so lange auf `disabled`, bis auch die
-Signaturpruefung in Central und Basic implementiert und getestet ist.
+Central, Basic, App und beide Factory-Installer pruefen den gemeinsamen
+Signaturvertrag.
 
 Wenn Python auf macOS mit einem SSL-Zertifikatsfehler scheitert, kannst du fuer den lokalen Test voruebergehend setzen:
 
@@ -83,6 +81,9 @@ Im Signatur-Pflichtmodus gilt:
 - Produktionsreleases werden standardmaessig nur aus einem frischen Build signiert
 - vorhandene beliebige BIN-Dateien werden abgelehnt
 - vor dem Upload werden Datei, Hash und Signatur erneut geprueft
+- der Build erhaelt `CAMPCLIMATE_RELEASE_SEQUENCE`
+- das fertige BIN muss genau eine `CCFWSEQ1`-Marke mit demselben
+  64-Bit-Sequenzwert enthalten
 
 ### Terminal
 
@@ -146,6 +147,7 @@ Die Tests erzeugen nur temporaere Testschluessel und pruefen unter anderem:
 - gueltige Signatur und Gegenpruefung
 - Ablehnung manipulierter Manifestfelder
 - Ablehnung nachtraeglich veraenderter Firmware
+- Ablehnung einer fehlenden, mehrfachen oder abweichenden BIN-Sequenz
 - Sperre beliebiger vorhandener BINs im Signatur-Pflichtmodus
 - content-addressed Storage-Pfade ohne Upsert
 - Readback-Pflicht auch bei bereits vorhandenen Storage-Objekten
@@ -176,5 +178,7 @@ Das Tool erwartet:
 - weil der aktuelle Firmware-Bucket public ist, ist ein Objekt mit bekanntem
   exaktem Pfad technisch bereits abrufbar; fuer App und Geraete wird es aber
   erst durch den verifizierten `published=true`-Datensatz auffindbar
-- `OTA_SIGNING_MODE=disabled` ist nur der Legacy-/Vorbereitungsmodus
+- `OTA_SIGNING_MODE=required` ist der Produktionsstandard
+- `OTA_SIGNING_MODE=disabled` ist nur ein bewusster Legacy-/Diagnosemodus und
+  darf nicht fuer neue Produktionsreleases verwendet werden
 - der private Produktionsschluessel darf niemals nach Git oder Supabase
