@@ -5,8 +5,11 @@ Kleines lokales Python-Tool, das eine Firmware-`.bin` aus dem `drop`-Ordner nimm
 - SHA256 berechnet
 - im Signatur-Pflichtmodus ein kanonisches Release-Manifest mit ECDSA P-256 signiert
 - die erzeugte Signatur sofort mit dem oeffentlichen Schluessel gegenprueft
-- Datei nach Supabase Storage hochlaedt
-- einen Eintrag in `public.firmware_releases` anlegt oder aktualisiert
+- die Datei unter einem SHA256-basierten, unveraenderlichen Storage-Pfad hochlaedt
+- bestehende Storage-Objekte niemals ueberschreibt
+- das vollstaendige BIN aus Supabase zurueckliest und erneut auf Groesse und SHA256 prueft
+- einen neuen Eintrag in `public.firmware_releases` zunaechst mit `published=false` anlegt
+- den Datenbankeintrag zurueckliest und erst danach auf `published=true` schaltet
 - die hochgeladene Datei in `archive` verschiebt
 - eine lokale `.release.json`-Akte neben dem archivierten BIN ablegt
 
@@ -14,7 +17,8 @@ Kleines lokales Python-Tool, das eine Firmware-`.bin` aus dem `drop`-Ordner nimm
 
 1. `.env.example` nach `env` kopieren
 2. `SUPABASE_SERVICE_ROLE_KEY` eintragen
-3. Sicherstellen, dass dein Supabase-Schema bereits einmalig angelegt wurde
+3. Sicherstellen, dass das Supabase-Schema einschliesslich
+   `firmware_release_signing_phase1.sql` eingespielt wurde
 
 Die Signaturvorbereitung ist in
 [`docs/ota_release_signing_v1.md`](docs/ota_release_signing_v1.md)
@@ -25,7 +29,9 @@ der Produktionsschluessel eingerichtet ist, bleibt:
 OTA_SIGNING_MODE=disabled
 ```
 
-Danach wird auf `required` umgestellt.
+Der Produktionsschluessel und die Supabase-Spalten sind vorbereitet.
+`OTA_SIGNING_MODE` bleibt trotzdem so lange auf `disabled`, bis auch die
+Signaturpruefung in Central und Basic implementiert und getestet ist.
 
 Wenn Python auf macOS mit einem SSL-Zertifikatsfehler scheitert, kannst du fuer den lokalen Test voruebergehend setzen:
 
@@ -72,6 +78,8 @@ Die GUI kann:
 Im Signatur-Pflichtmodus gilt:
 
 - `Release-Sequenz` ist Pflicht
+- die Sequenz muss groesser als die hoechste bereits vorhandene signierte
+  Sequenz desselben Targets sein
 - Produktionsreleases werden standardmaessig nur aus einem frischen Build signiert
 - vorhandene beliebige BIN-Dateien werden abgelehnt
 - vor dem Upload werden Datei, Hash und Signatur erneut geprueft
@@ -139,6 +147,11 @@ Die Tests erzeugen nur temporaere Testschluessel und pruefen unter anderem:
 - Ablehnung manipulierter Manifestfelder
 - Ablehnung nachtraeglich veraenderter Firmware
 - Sperre beliebiger vorhandener BINs im Signatur-Pflichtmodus
+- content-addressed Storage-Pfade ohne Upsert
+- Readback-Pflicht auch bei bereits vorhandenen Storage-Objekten
+- Ablehnung eines abweichenden Supabase-Readbacks
+- monotone Release-Sequenzen
+- Freigabe eines Releases erst nach unveroeffentlichtem Insert und DB-Readback
 
 ## Erwarteter Supabase-Stand
 
@@ -146,12 +159,22 @@ Das Tool erwartet:
 
 - einen existierenden Public-Bucket, Standardname `firmware`
 - die Tabelle `public.firmware_releases`
-- vor `OTA_SIGNING_MODE=required` die additiven Signaturspalten aus dem Vertrag
+- die additiven Signaturspalten aus dem Vertrag
+- die Public-Read-Policy, die nur `published=true` sichtbar macht
 
 ## Hinweise
 
 - `storage_path` wird als `bucket/pfad/zur/datei.bin` gespeichert
 - die App baut daraus spaeter automatisch die Download-URL
-- bei gleichem `target` + `version` wird der Release-Eintrag aktualisiert
+- neue Objekte verwenden
+  `<target>/sha256/<firmware-sha256>.bin`
+- bei gleichem `target` + `version` werden abweichende Release-Daten abgelehnt
+  und niemals aktualisiert
+- ein exakt identischer Lauf ist idempotent: Ein bereits veroeffentlichtes
+  Release wird nicht erneut geschrieben; ein noch unveroeffentlichter Lauf
+  wird kontrolliert fortgesetzt
+- weil der aktuelle Firmware-Bucket public ist, ist ein Objekt mit bekanntem
+  exaktem Pfad technisch bereits abrufbar; fuer App und Geraete wird es aber
+  erst durch den verifizierten `published=true`-Datensatz auffindbar
 - `OTA_SIGNING_MODE=disabled` ist nur der Legacy-/Vorbereitungsmodus
 - der private Produktionsschluessel darf niemals nach Git oder Supabase

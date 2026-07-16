@@ -63,7 +63,8 @@ Produktionshaertung.
 Vor Freigabe fuer Kunden muss die Sequenz auch in der Firmware selbst enthalten
 sein. Der Publisher muss dann pruefen, dass Eingabe, Source und BIN denselben
 Wert tragen. Die aktuelle Publisher-Vorbereitung nimmt die Sequenz noch als
-Operator-Eingabe beziehungsweise aus `env`.
+Operator-Eingabe beziehungsweise aus `env`, prueft sie aber bereits gegen die
+hoechste in Supabase vorhandene signierte Sequenz desselben Targets.
 
 ## Schluesselmodell
 
@@ -104,8 +105,15 @@ Im Modus `OTA_SIGNING_MODE=required`:
 5. Manifest mit dem privaten Schluessel signieren.
 6. Signatur sofort mit dem konfigurierten oeffentlichen Schluessel pruefen.
 7. vor dem Upload Datei erneut auf Groesse und SHA256 pruefen.
-8. Firmware und Signaturmetadaten nach Supabase schreiben.
-9. lokale Release-Akte neben dem archivierten BIN speichern.
+8. Firmware unter
+   `<target>/sha256/<firmware-sha256>.bin` ohne Upsert hochladen.
+9. das vollstaendige Storage-Objekt zuruecklesen und Groesse sowie SHA256
+   erneut pruefen.
+10. Release-Datensatz mit `published=false` neu einfuegen.
+11. den unveroeffentlichten Datensatz aus Supabase zuruecklesen und alle
+    Identitaets- und Signaturfelder vergleichen.
+12. erst danach exakt diesen Datensatz auf `published=true` setzen.
+13. lokale Release-Akte neben dem archivierten BIN speichern.
 
 Ein vorhandenes beliebiges BIN wird im Pflichtmodus standardmaessig abgelehnt.
 Der kontrollierte Ausnahmeweg `OTA_ALLOW_EXISTING_SIGNED_BIN=1` ist kein
@@ -113,8 +121,8 @@ Produktionsstandard.
 
 ## Supabase-Erweiterung
 
-Vor Aktivierung von `OTA_SIGNING_MODE=required` benoetigt
-`public.firmware_releases` mindestens:
+Die additive Phase-1-Migration wurde am 2026-07-16 erfolgreich eingespielt und
+verifiziert. `public.firmware_releases` besitzt:
 
 - `manifest_version integer`
 - `signature_algorithm text`
@@ -122,9 +130,13 @@ Vor Aktivierung von `OTA_SIGNING_MODE=required` benoetigt
 - `release_sequence bigint`
 - `signature_base64 text`
 
-Die Migration erfolgt additiv. Bestehende Releases bleiben zunaechst lesbar.
-Nach erfolgreicher Bridge-Migration werden fuer neue veroeffentlichte Releases
-vollstaendige Signaturfelder per Constraint erzwungen.
+Die Migration ist additiv. Alle 52 bestehenden Releases bleiben lesbar.
+Signaturfelder sind per Constraint entweder vollstaendig gesetzt oder
+vollstaendig leer. Release-Sequenzen sind pro Target eindeutig.
+
+Der Publisher verhindert zusaetzlich normale Rueckwaertssequenzen bereits vor
+dem Upload. Fuer den spaeteren Mehrprozess- oder CI-Betrieb bleibt ein
+serverseitig atomarer Monotonie-Guard als weitere Supabase-Haertung vorgesehen.
 
 ## Bestandsgeraete und Bridge-Release
 
@@ -148,11 +160,11 @@ waehlbare URL oder beliebige Firmware.
 
 ## Noch nicht durch diese Publisher-Phase geloest
 
-- Supabase-Migration und serverseitige Publish-Constraints
 - Signaturpruefung in Central-OTA
 - Signaturpruefung in Basic-OTA
 - Signaturpruefung in Central- und Basic-Factory-Installer
 - Uebergabe der Signaturmetadaten von Central an Basic
 - automatischer Abgleich der Release-Sequenz mit Source und BIN
+- serverseitig atomare Monotonie-Pruefung fuer parallele Publisher
 - Command-Vertrag ausschliesslich ueber serverseitig validierte Release-ID
 - Hardware Secure Boot, Flash Encryption und eFuse-Anti-Rollback

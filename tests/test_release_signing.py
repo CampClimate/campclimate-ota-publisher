@@ -261,6 +261,243 @@ class ReleaseSigningTests(unittest.TestCase):
         self.assertTrue(context.check_hostname)
         self.assertEqual(context.verify_mode, 2)
 
+    def test_release_uses_content_addressed_storage_path(self) -> None:
+        firmware = self.root / "firmware.bin"
+        firmware.write_bytes(b"content addressed firmware")
+        summary = publisher.build_release_summary(
+            supabase_url="https://example.supabase.co",
+            bucket="firmware",
+            file_path=firmware,
+            target="Central",
+            version="2.0.1.10",
+            notes="Test",
+            mandatory=False,
+        )
+        expected_sha256 = publisher.sha256_of_file(firmware)
+        self.assertEqual(summary["target"], "central")
+        self.assertEqual(
+            summary["object_path"],
+            f"central/sha256/{expected_sha256}.bin",
+        )
+        self.assertEqual(
+            summary["storage_path"],
+            f"firmware/central/sha256/{expected_sha256}.bin",
+        )
+
+    def test_immutable_upload_never_enables_upsert_and_always_reads_back(self) -> None:
+        firmware = self.root / "firmware.bin"
+        firmware.write_bytes(b"immutable upload")
+        digest = publisher.sha256_of_file(firmware)
+        with mock.patch("publisher.upload_file") as upload, mock.patch(
+            "publisher.verify_remote_artifact"
+        ) as verify:
+            publisher.upload_immutable_artifact(
+                "https://example.supabase.co",
+                "service-role",
+                "firmware",
+                f"central/sha256/{digest}.bin",
+                firmware,
+                firmware.stat().st_size,
+                digest,
+            )
+        upload.assert_called_once_with(
+            "https://example.supabase.co",
+            "service-role",
+            "firmware",
+            f"central/sha256/{digest}.bin",
+            firmware,
+        )
+        verify.assert_called_once()
+
+    def test_duplicate_content_object_is_only_reused_after_readback(self) -> None:
+        firmware = self.root / "firmware.bin"
+        firmware.write_bytes(b"already uploaded")
+        digest = publisher.sha256_of_file(firmware)
+        duplicate = publisher.HttpRequestError(
+            409,
+            "https://example.supabase.co/storage/v1/object/firmware/test.bin",
+            '{"error":"Duplicate","message":"The resource already exists"}',
+        )
+        with mock.patch(
+            "publisher.upload_file",
+            side_effect=duplicate,
+        ), mock.patch("publisher.verify_remote_artifact") as verify:
+            publisher.upload_immutable_artifact(
+                "https://example.supabase.co",
+                "service-role",
+                "firmware",
+                f"central/sha256/{digest}.bin",
+                firmware,
+                firmware.stat().st_size,
+                digest,
+            )
+        verify.assert_called_once()
+
+    def test_remote_artifact_mismatch_is_rejected(self) -> None:
+        with mock.patch(
+            "publisher.download_public_object",
+            return_value=b"tampered remote firmware",
+        ):
+            with self.assertRaises(RuntimeError):
+                publisher.verify_remote_artifact(
+                    "https://example.supabase.co",
+                    "service-role",
+                    "firmware",
+                    "central/sha256/test.bin",
+                    len(b"expected firmware"),
+                    publisher.hashlib.sha256(b"expected firmware").hexdigest(),
+                )
+
+    def test_signed_release_sequence_must_increase(self) -> None:
+        summary = {
+            "signed": True,
+            "target": "central",
+            "release_sequence": 10,
+        }
+        latest = {
+            "id": "latest-release",
+            "version": "2.0.1.9",
+            "release_sequence": 10,
+            "published": True,
+        }
+        with mock.patch(
+            "publisher.fetch_latest_signed_release",
+            return_value=latest,
+        ):
+            with self.assertRaises(RuntimeError):
+                publisher._assert_release_sequence_monotonic(
+                    "https://example.supabase.co",
+                    "service-role",
+                    summary,
+                    None,
+                )
+
+        summary["release_sequence"] = 11
+        with mock.patch(
+            "publisher.fetch_latest_signed_release",
+            return_value=latest,
+        ):
+            publisher._assert_release_sequence_monotonic(
+                "https://example.supabase.co",
+                "service-role",
+                summary,
+                None,
+            )
+
+    def test_exact_published_release_is_idempotent_but_cannot_be_changed(self) -> None:
+        summary = {
+            "signed": False,
+            "target": "central",
+            "version": "2.0.1.10",
+            "notes": "Idempotent test",
+            "storage_path": "firmware/central/sha256/" + ("ab" * 32) + ".bin",
+            "file_size": 123,
+            "sha256": "ab" * 32,
+            "mandatory": False,
+        }
+        existing = {
+            "id": "existing-release",
+            "target": summary["target"],
+            "version": summary["version"],
+            "notes": summary["notes"],
+            "storage_path": summary["storage_path"],
+            "file_size_bytes": summary["file_size"],
+            "sha256": summary["sha256"],
+            "mandatory": summary["mandatory"],
+            "published": True,
+        }
+        publisher._adopt_existing_release(summary, existing)
+
+        changed = dict(existing)
+        changed["sha256"] = "cd" * 32
+        with self.assertRaises(RuntimeError):
+            publisher._adopt_existing_release(summary, changed)
+
+    def test_publish_is_staged_and_only_visible_after_readback(self) -> None:
+        firmware = self.root / "firmware.bin"
+        firmware.write_bytes(b"staged publish")
+        environment = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "service-role",
+            "SUPABASE_STORAGE_BUCKET": "firmware",
+            "OTA_SIGNING_MODE": "disabled",
+        }
+        with mock.patch.dict(os.environ, environment, clear=False):
+            summary = publisher.prepare_release(
+                file_path=firmware,
+                target="central",
+                version="2.0.1.10",
+                notes="Staged test",
+                mandatory=False,
+            )
+
+        def release_row(published: bool) -> dict[str, object]:
+            return {
+                "id": "release-id",
+                "target": summary["target"],
+                "version": summary["version"],
+                "notes": summary["notes"],
+                "storage_path": summary["storage_path"],
+                "file_size_bytes": summary["file_size"],
+                "sha256": summary["sha256"],
+                "mandatory": summary["mandatory"],
+                "published": published,
+                "manifest_version": None,
+                "signature_algorithm": None,
+                "signing_key_id": None,
+                "release_sequence": None,
+                "signature_base64": None,
+                "created_at": "2026-07-16T00:00:00Z",
+            }
+
+        events: list[str] = []
+        archived_path = self.root / "archive" / "firmware.bin"
+        record_path = self.root / "archive" / "firmware.bin.release.json"
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch(
+            "publisher.preflight_release",
+            side_effect=lambda *_args: events.append("preflight"),
+        ), mock.patch(
+            "publisher.upload_immutable_artifact",
+            side_effect=lambda *_args: events.append("upload"),
+        ), mock.patch(
+            "publisher.insert_unpublished_release",
+            side_effect=lambda *_args: (
+                events.append("insert-unpublished"),
+                release_row(False),
+            )[1],
+        ), mock.patch(
+            "publisher.fetch_release_by_id",
+            side_effect=lambda *_args: (
+                events.append("database-readback"),
+                release_row(False),
+            )[1],
+        ), mock.patch(
+            "publisher.mark_release_published",
+            side_effect=lambda *_args: (
+                events.append("publish"),
+                release_row(True),
+            )[1],
+        ), mock.patch(
+            "publisher.archive_uploaded_file",
+            return_value=archived_path,
+        ), mock.patch(
+            "publisher.archive_release_record",
+            return_value=record_path,
+        ):
+            result = publisher.publish_prepared_release(summary)
+
+        self.assertEqual(
+            events,
+            [
+                "preflight",
+                "upload",
+                "insert-unpublished",
+                "database-readback",
+                "publish",
+            ],
+        )
+        self.assertTrue(result["release"]["published"])
+
 
 if __name__ == "__main__":
     unittest.main()

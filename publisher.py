@@ -39,6 +39,19 @@ DEFAULT_HTTP_RETRIES = 3
 DEFAULT_UPLOAD_TIMEOUT = 300
 SIGNING_MODE_DISABLED = "disabled"
 SIGNING_MODE_REQUIRED = "required"
+RELEASE_SELECT_FIELDS = (
+    "id,target,version,notes,storage_path,file_size_bytes,sha256,mandatory,"
+    "published,manifest_version,signature_algorithm,signing_key_id,"
+    "release_sequence,signature_base64,created_at"
+)
+
+
+class HttpRequestError(RuntimeError):
+    def __init__(self, status: int, url: str, body: str) -> None:
+        self.status = status
+        self.url = url
+        self.body = body
+        super().__init__(f"HTTP {status} fuer {url}: {body}")
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -205,12 +218,12 @@ def make_ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
-def request_json(method: str,
-                 url: str,
-                 headers: dict[str, str],
-                 data: bytes | None = None,
-                 timeout: int = DEFAULT_HTTP_TIMEOUT,
-                 retries: int = DEFAULT_HTTP_RETRIES) -> tuple[int, str]:
+def request_bytes(method: str,
+                  url: str,
+                  headers: dict[str, str],
+                  data: bytes | None = None,
+                  timeout: int = DEFAULT_HTTP_TIMEOUT,
+                  retries: int = DEFAULT_HTTP_RETRIES) -> tuple[int, bytes]:
     request = urllib.request.Request(url=url, data=data, method=method)
     for key, value in headers.items():
         request.add_header(key, value)
@@ -222,11 +235,10 @@ def request_json(method: str,
     for attempt in range(1, attempts + 1):
         try:
             with urllib.request.urlopen(request, timeout=timeout, context=ssl_context) as response:
-                body = response.read().decode("utf-8", errors="replace")
-                return response.status, body
+                return response.status, response.read()
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"HTTP {exc.code} fuer {url}: {body}") from exc
+            raise HttpRequestError(exc.code, url, body) from exc
         except TimeoutError as exc:
             last_error = exc
             if attempt == attempts:
@@ -245,6 +257,23 @@ def request_json(method: str,
     raise RuntimeError(f"Unbekannter Fehler fuer {url}")
 
 
+def request_json(method: str,
+                 url: str,
+                 headers: dict[str, str],
+                 data: bytes | None = None,
+                 timeout: int = DEFAULT_HTTP_TIMEOUT,
+                 retries: int = DEFAULT_HTTP_RETRIES) -> tuple[int, str]:
+    status, body = request_bytes(
+        method,
+        url,
+        headers,
+        data,
+        timeout=timeout,
+        retries=retries,
+    )
+    return status, body.decode("utf-8", errors="replace")
+
+
 def upload_file(supabase_url: str,
                 service_role_key: str,
                 bucket: str,
@@ -257,58 +286,233 @@ def upload_file(supabase_url: str,
         "apikey": service_role_key,
         "Authorization": f"Bearer {service_role_key}",
         "Content-Type": "application/octet-stream",
-        "x-upsert": "true",
+        "x-upsert": "false",
     }
     upload_timeout = int(env_value("SUPABASE_UPLOAD_TIMEOUT", str(DEFAULT_UPLOAD_TIMEOUT)) or DEFAULT_UPLOAD_TIMEOUT)
     print(f"Upload-Timeout: {upload_timeout} Sekunden")
     request_json("POST", url, headers, data, timeout=upload_timeout)
 
 
-def upsert_release(supabase_url: str,
-                   service_role_key: str,
-                   target: str,
-                   version: str,
-                   notes: str,
-                   storage_path: str,
-                   file_size_bytes: int,
-                   sha256: str,
-                   mandatory: bool,
-                   signature_metadata: dict[str, object] | None = None) -> dict[str, object]:
-    select_fields = "id,target,version,storage_path,sha256,created_at"
-    if signature_metadata:
-        select_fields += (
-            ",manifest_version,signature_algorithm,signing_key_id,"
-            "release_sequence,signature_base64"
-        )
-    params = urllib.parse.urlencode(
-        {
-            "on_conflict": "target,version",
-            "select": select_fields,
-        }
-    )
-    url = f"{supabase_url}/rest/v1/firmware_releases?{params}"
-    release_payload: dict[str, object] = {
-        "target": target,
-        "version": version,
-        "notes": notes,
-        "storage_path": storage_path,
-        "file_size_bytes": file_size_bytes,
-        "sha256": sha256,
-        "mandatory": mandatory,
-    }
-    if signature_metadata:
-        release_payload.update(signature_metadata)
-    payload = [release_payload]
+def download_public_object(supabase_url: str,
+                           service_role_key: str,
+                           bucket: str,
+                           object_path: str) -> bytes:
+    url = make_public_url(supabase_url, bucket, object_path)
     headers = {
         "apikey": service_role_key,
         "Authorization": f"Bearer {service_role_key}",
-        "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates,return=representation",
+        "Cache-Control": "no-cache",
     }
-    _, body = request_json("POST", url, headers, json.dumps(payload).encode("utf-8"))
+    _, body = request_bytes("GET", url, headers)
+    return body
+
+
+def verify_remote_artifact(supabase_url: str,
+                           service_role_key: str,
+                           bucket: str,
+                           object_path: str,
+                           expected_size: int,
+                           expected_sha256: str) -> None:
+    body = download_public_object(
+        supabase_url,
+        service_role_key,
+        bucket,
+        object_path,
+    )
+    actual_sha256 = hashlib.sha256(body).hexdigest()
+    if len(body) != expected_size or actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            "Supabase-Readback stimmt nicht mit dem lokalen Firmware-Artefakt "
+            "ueberein."
+        )
+
+
+def upload_immutable_artifact(supabase_url: str,
+                              service_role_key: str,
+                              bucket: str,
+                              object_path: str,
+                              file_path: Path,
+                              expected_size: int,
+                              expected_sha256: str) -> None:
+    try:
+        upload_file(
+            supabase_url,
+            service_role_key,
+            bucket,
+            object_path,
+            file_path,
+        )
+    except HttpRequestError as exc:
+        normalized_body = exc.body.lower()
+        duplicate = exc.status in {400, 409} and (
+            "duplicate" in normalized_body
+            or "already exists" in normalized_body
+            or "resource already exists" in normalized_body
+        )
+        if not duplicate:
+            raise
+        print("Content-addressed Storage-Objekt existiert bereits; Readback wird geprueft.")
+
+    verify_remote_artifact(
+        supabase_url,
+        service_role_key,
+        bucket,
+        object_path,
+        expected_size,
+        expected_sha256,
+    )
+
+
+def _service_headers(service_role_key: str) -> dict[str, str]:
+    return {
+        "apikey": service_role_key,
+        "Authorization": f"Bearer {service_role_key}",
+    }
+
+
+def _decode_release_rows(body: str) -> list[dict[str, object]]:
     rows = json.loads(body)
-    if not rows:
-        raise RuntimeError("Supabase hat keinen Release-Datensatz zurueckgegeben.")
+    if not isinstance(rows, list):
+        raise RuntimeError("Supabase hat keine Release-Liste zurueckgegeben.")
+    return rows
+
+
+def fetch_release_by_target_version(supabase_url: str,
+                                    service_role_key: str,
+                                    target: str,
+                                    version: str) -> dict[str, object] | None:
+    params = urllib.parse.urlencode(
+        {
+            "select": RELEASE_SELECT_FIELDS,
+            "target": f"eq.{target}",
+            "version": f"eq.{version}",
+            "limit": "2",
+        }
+    )
+    url = f"{supabase_url}/rest/v1/firmware_releases?{params}"
+    _, body = request_json("GET", url, _service_headers(service_role_key))
+    rows = _decode_release_rows(body)
+    if len(rows) > 1:
+        raise RuntimeError(
+            "Supabase enthaelt mehrere Releases fuer dieselbe Target-/Versionskombination."
+        )
+    return rows[0] if rows else None
+
+
+def fetch_release_by_id(supabase_url: str,
+                        service_role_key: str,
+                        release_id: str) -> dict[str, object]:
+    params = urllib.parse.urlencode(
+        {
+            "select": RELEASE_SELECT_FIELDS,
+            "id": f"eq.{release_id}",
+            "limit": "2",
+        }
+    )
+    url = f"{supabase_url}/rest/v1/firmware_releases?{params}"
+    _, body = request_json("GET", url, _service_headers(service_role_key))
+    rows = _decode_release_rows(body)
+    if len(rows) != 1:
+        raise RuntimeError(
+            "Supabase-Readback hat nicht exakt einen Release-Datensatz geliefert."
+        )
+    return rows[0]
+
+
+def fetch_latest_signed_release(supabase_url: str,
+                                service_role_key: str,
+                                target: str) -> dict[str, object] | None:
+    params = urllib.parse.urlencode(
+        {
+            "select": "id,version,release_sequence,published",
+            "target": f"eq.{target}",
+            "release_sequence": "not.is.null",
+            "order": "release_sequence.desc",
+            "limit": "1",
+        }
+    )
+    url = f"{supabase_url}/rest/v1/firmware_releases?{params}"
+    _, body = request_json("GET", url, _service_headers(service_role_key))
+    rows = _decode_release_rows(body)
+    return rows[0] if rows else None
+
+
+def insert_unpublished_release(
+    supabase_url: str,
+    service_role_key: str,
+    summary: dict[str, object],
+) -> dict[str, object]:
+    params = urllib.parse.urlencode({"select": RELEASE_SELECT_FIELDS})
+    url = f"{supabase_url}/rest/v1/firmware_releases?{params}"
+    release_payload: dict[str, object] = {
+        "target": str(summary["target"]),
+        "version": str(summary["version"]),
+        "notes": str(summary["notes"]),
+        "storage_path": str(summary["storage_path"]),
+        "file_size_bytes": int(summary["file_size"]),
+        "sha256": str(summary["sha256"]),
+        "mandatory": bool(summary["mandatory"]),
+        "published": False,
+    }
+    if bool(summary.get("signed")):
+        release_payload.update(
+            {
+                "manifest_version": int(summary["manifest_version"]),
+                "signature_algorithm": str(summary["signature_algorithm"]),
+                "signing_key_id": str(summary["signing_key_id"]),
+                "release_sequence": int(summary["release_sequence"]),
+                "signature_base64": str(summary["signature_base64"]),
+            }
+        )
+    payload = [release_payload]
+    headers = {
+        **_service_headers(service_role_key),
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+    _, body = request_json(
+        "POST",
+        url,
+        headers,
+        json.dumps(payload).encode("utf-8"),
+        retries=1,
+    )
+    rows = _decode_release_rows(body)
+    if len(rows) != 1:
+        raise RuntimeError(
+            "Supabase hat nach dem Insert nicht exakt einen Release-Datensatz zurueckgegeben."
+        )
+    return rows[0]
+
+
+def mark_release_published(supabase_url: str,
+                           service_role_key: str,
+                           release_id: str) -> dict[str, object]:
+    params = urllib.parse.urlencode(
+        {
+            "id": f"eq.{release_id}",
+            "published": "eq.false",
+            "select": RELEASE_SELECT_FIELDS,
+        }
+    )
+    url = f"{supabase_url}/rest/v1/firmware_releases?{params}"
+    headers = {
+        **_service_headers(service_role_key),
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+    _, body = request_json(
+        "PATCH",
+        url,
+        headers,
+        json.dumps({"published": True}).encode("utf-8"),
+        retries=1,
+    )
+    rows = _decode_release_rows(body)
+    if len(rows) != 1:
+        raise RuntimeError(
+            "Release konnte nicht kontrolliert von unpublished auf published gesetzt werden."
+        )
     return rows[0]
 
 
@@ -376,18 +580,23 @@ def build_release_summary(
     mandatory: bool,
     release_sequence: int | None = None,
 ) -> dict[str, object]:
+    normalized_target = target.strip().lower()
+    if normalized_target not in {"basic", "central"}:
+        raise RuntimeError("Target muss 'basic' oder 'central' sein.")
+    normalized_version = version.strip()
+    if not normalized_version:
+        raise RuntimeError("Version darf nicht leer sein.")
+
     file_size = file_path.stat().st_size
-    safe_target = slugify(target)
-    safe_version = slugify(version)
-    object_path = f"{safe_target}/{safe_version}/{file_path.name}"
+    sha256 = sha256_of_file(file_path)
+    object_path = f"{normalized_target}/sha256/{sha256}.bin"
     storage_path = f"{bucket}/{object_path}"
     public_url = make_public_url(supabase_url, bucket, object_path)
-    sha256 = sha256_of_file(file_path)
     return {
         "file_path": file_path,
         "file_name": file_path.name,
-        "target": target,
-        "version": version,
+        "target": normalized_target,
+        "version": normalized_version,
         "notes": notes,
         "mandatory": mandatory,
         "release_sequence": release_sequence,
@@ -442,8 +651,8 @@ def prepare_release(
     try:
         config = signing_config_from_values(env_value)
         manifest = ReleaseManifest(
-            target=target,
-            version=version,
+            target=str(summary["target"]),
+            version=str(summary["version"]),
             release_sequence=release_sequence,
             file_size_bytes=int(summary["file_size"]),
             sha256=str(summary["sha256"]),
@@ -527,13 +736,20 @@ def _verify_prepared_signature(summary: dict[str, object]) -> None:
 def _assert_release_row_matches(
     summary: dict[str, object],
     release: dict[str, object],
+    *,
+    expected_published: bool | None = None,
 ) -> None:
     expected: dict[str, object] = {
         "target": str(summary["target"]),
         "version": str(summary["version"]),
+        "notes": str(summary["notes"]),
         "storage_path": str(summary["storage_path"]),
+        "file_size_bytes": int(summary["file_size"]),
         "sha256": str(summary["sha256"]),
+        "mandatory": bool(summary["mandatory"]),
     }
+    if expected_published is not None:
+        expected["published"] = expected_published
     if bool(summary.get("signed")):
         expected.update(
             {
@@ -556,40 +772,152 @@ def _assert_release_row_matches(
         )
 
 
+def _adopt_existing_release(
+    summary: dict[str, object],
+    existing: dict[str, object],
+) -> None:
+    if bool(summary.get("signed")):
+        existing_signature = str(existing.get("signature_base64") or "")
+        recovered_summary = dict(summary)
+        recovered_summary["signature_base64"] = existing_signature
+        _verify_prepared_signature(recovered_summary)
+        summary["signature_base64"] = existing_signature
+
+    _assert_release_row_matches(
+        summary,
+        existing,
+        expected_published=bool(existing.get("published")),
+    )
+
+
+def _assert_release_sequence_monotonic(
+    supabase_url: str,
+    service_role_key: str,
+    summary: dict[str, object],
+    existing: dict[str, object] | None,
+) -> None:
+    if not bool(summary.get("signed")):
+        return
+
+    latest = fetch_latest_signed_release(
+        supabase_url,
+        service_role_key,
+        str(summary["target"]),
+    )
+    if latest is None:
+        return
+
+    candidate = int(summary["release_sequence"])
+    latest_sequence = int(latest["release_sequence"])
+    recovering_same_row = (
+        existing is not None
+        and str(existing.get("id", "")) == str(latest.get("id", ""))
+        and candidate == latest_sequence
+    )
+    if not recovering_same_row and candidate <= latest_sequence:
+        raise RuntimeError(
+            f"Release-Sequenz {candidate} ist nicht groesser als die aktuell "
+            f"hoechste Sequenz {latest_sequence} fuer {summary['target']}."
+        )
+
+
+def preflight_release(
+    supabase_url: str,
+    service_role_key: str,
+    summary: dict[str, object],
+) -> dict[str, object] | None:
+    existing = fetch_release_by_target_version(
+        supabase_url,
+        service_role_key,
+        str(summary["target"]),
+        str(summary["version"]),
+    )
+    if existing is not None:
+        _adopt_existing_release(summary, existing)
+
+    _assert_release_sequence_monotonic(
+        supabase_url,
+        service_role_key,
+        summary,
+        existing,
+    )
+    return existing
+
+
 def publish_prepared_release(summary: dict[str, object]) -> dict[str, object]:
     supabase_url, service_role_key, bucket = ensure_setup()
     file_path = _assert_prepared_artifact_unchanged(summary)
     _verify_prepared_signature(summary)
-    if str(summary["object_path"]).split("/", 1)[0] != slugify(str(summary["target"])):
-        raise RuntimeError("Vorbereiteter Storage-Pfad passt nicht zum Firmware-Target.")
-
-    signature_metadata: dict[str, object] | None = None
-    if bool(summary.get("signed")):
-        signature_metadata = {
-            "manifest_version": int(summary["manifest_version"]),
-            "signature_algorithm": str(summary["signature_algorithm"]),
-            "signing_key_id": str(summary["signing_key_id"]),
-            "release_sequence": int(summary["release_sequence"]),
-            "signature_base64": str(summary["signature_base64"]),
-        }
-
-    upload_file(supabase_url, service_role_key, bucket, str(summary["object_path"]), file_path)
-    release = upsert_release(
-        supabase_url=supabase_url,
-        service_role_key=service_role_key,
-        target=str(summary["target"]),
-        version=str(summary["version"]),
-        notes=str(summary["notes"]),
-        storage_path=str(summary["storage_path"]),
-        file_size_bytes=int(summary["file_size"]),
-        sha256=str(summary["sha256"]),
-        mandatory=bool(summary["mandatory"]),
-        signature_metadata=signature_metadata,
+    expected_object_path = (
+        f"{summary['target']}/sha256/{summary['sha256']}.bin"
     )
-    _assert_release_row_matches(summary, release)
+    if str(summary["object_path"]) != expected_object_path:
+        raise RuntimeError(
+            "Vorbereiteter Storage-Pfad ist nicht content-addressed oder passt "
+            "nicht zu Target und SHA256."
+        )
+    if str(summary["storage_path"]) != f"{bucket}/{expected_object_path}":
+        raise RuntimeError("Vorbereiteter Storage-Pfad passt nicht zum aktiven Bucket.")
+
+    existing = preflight_release(supabase_url, service_role_key, summary)
+    upload_immutable_artifact(
+        supabase_url,
+        service_role_key,
+        bucket,
+        str(summary["object_path"]),
+        file_path,
+        int(summary["file_size"]),
+        str(summary["sha256"]),
+    )
+
+    if existing is None:
+        release = insert_unpublished_release(
+            supabase_url,
+            service_role_key,
+            summary,
+        )
+        _assert_release_row_matches(
+            summary,
+            release,
+            expected_published=False,
+        )
+    else:
+        release = existing
+
+    if bool(release.get("published")):
+        published_release = release
+    else:
+        release_id = str(release.get("id", ""))
+        if not release_id:
+            raise RuntimeError("Supabase-Release besitzt keine gueltige ID.")
+        readback_release = fetch_release_by_id(
+            supabase_url,
+            service_role_key,
+            release_id,
+        )
+        _assert_release_row_matches(
+            summary,
+            readback_release,
+            expected_published=False,
+        )
+        published_release = mark_release_published(
+            supabase_url,
+            service_role_key,
+            release_id,
+        )
+        _assert_release_row_matches(
+            summary,
+            published_release,
+            expected_published=True,
+        )
+
     archived_path = archive_uploaded_file(file_path, slugify(str(summary["version"])))
-    release_record_path = archive_release_record(summary, release, archived_path)
-    summary["release"] = release
+    release_record_path = archive_release_record(
+        summary,
+        published_release,
+        archived_path,
+    )
+    summary["release"] = published_release
     summary["archived_path"] = archived_path
     summary["release_record_path"] = release_record_path
     return summary
