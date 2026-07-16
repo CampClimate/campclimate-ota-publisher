@@ -14,6 +14,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+try:
+    import certifi
+except ImportError:
+    certifi = None
+
 from release_signing import (
     ReleaseManifest,
     SignedReleaseManifest,
@@ -188,6 +193,18 @@ def stage_bin_copy(source_path: Path, target: str, version: str) -> Path:
     return destination
 
 
+def make_ssl_context() -> ssl.SSLContext:
+    insecure_ssl = env_bool("SUPABASE_INSECURE_SSL", False)
+    if insecure_ssl:
+        print(
+            "WARNUNG: TLS-Zertifikatspruefung ist durch SUPABASE_INSECURE_SSL deaktiviert."
+        )
+        return ssl._create_unverified_context()
+    if certifi is not None:
+        return ssl.create_default_context(cafile=certifi.where())
+    return ssl.create_default_context()
+
+
 def request_json(method: str,
                  url: str,
                  headers: dict[str, str],
@@ -198,12 +215,7 @@ def request_json(method: str,
     for key, value in headers.items():
         request.add_header(key, value)
 
-    ssl_context = None
-    insecure_ssl = env_value("SUPABASE_INSECURE_SSL", "0").strip().lower() in {
-        "1", "true", "yes", "y", "on"
-    }
-    if insecure_ssl:
-        ssl_context = ssl._create_unverified_context()
+    ssl_context = make_ssl_context()
 
     attempts = max(retries, 1)
     last_error: Exception | None = None

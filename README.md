@@ -33,7 +33,16 @@ Wenn Python auf macOS mit einem SSL-Zertifikatsfehler scheitert, kannst du fuer 
 SUPABASE_INSECURE_SSL=1
 ```
 
-Das sollte nur lokal und bewusst als Fallback genutzt werden.
+Das sollte nur lokal und bewusst als Fallback genutzt werden. Der sichere
+Standard ist `SUPABASE_INSECURE_SSL=0`. Auf macOS nutzt der Publisher, sofern
+installiert, das aktuelle `certifi`-CA-Bundle:
+
+```bash
+/usr/local/bin/python3 -m pip install --user certifi
+```
+
+Der Service-Role-Key darf nicht mit deaktivierter Zertifikatspruefung fuer
+Produktionsuploads verwendet werden.
 
 ## Nutzung
 

@@ -251,6 +251,16 @@ class ReleaseSigningTests(unittest.TestCase):
         self.assertNotIn("BEGIN EC PRIVATE KEY", private_path.read_text(encoding="utf-8"))
         self.assertIn("BEGIN ENCRYPTED PRIVATE KEY", private_path.read_text(encoding="utf-8"))
 
+    def test_ssl_context_verifies_certificates_by_default(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"SUPABASE_INSECURE_SSL": "0"},
+            clear=False,
+        ):
+            context = publisher.make_ssl_context()
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
