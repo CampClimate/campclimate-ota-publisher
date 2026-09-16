@@ -10,7 +10,9 @@ from pathlib import Path
 import shutil
 import ssl
 import struct
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,6 +44,12 @@ SIGNING_MODE_DISABLED = "disabled"
 SIGNING_MODE_REQUIRED = "required"
 RELEASE_SEQUENCE_MARKER = b"CCFWSEQ1"
 RELEASE_SEQUENCE_BYTES = 8
+CENTRAL_PROJECT_ROOT = ROOT.parent / "CampClimate Central 2.0"
+CENTRAL_IMAGE_TOOL = CENTRAL_PROJECT_ROOT / "tools" / "security" / "image_tool.py"
+CENTRAL_SECURE_BOOT_PRIVATE_KEY_ENV = "CENTRAL_SECURE_BOOT_PRIVATE_KEY"
+CENTRAL_EXPECTED_IMAGE_KIND = "production"
+CENTRAL_EXPECTED_HARDWARE = "2.0"
+CENTRAL_EXPECTED_SIGNATURE_SCHEME = "rsa3072"
 RELEASE_SELECT_FIELDS = (
     "id,target,version,notes,storage_path,file_size_bytes,sha256,mandatory,"
     "published,manifest_version,signature_algorithm,signing_key_id,"
@@ -206,6 +214,317 @@ def assert_embedded_release_sequence(path: Path, expected_sequence: int) -> int:
             f"Publisher-Eingabe: BIN={actual_sequence}, Eingabe={expected_sequence}."
         )
     return actual_sequence
+
+
+def _path_is_inside_git_repository(path: Path) -> bool:
+    for parent in (path.parent, *path.parents):
+        if (parent / ".git").exists():
+            return True
+    return False
+
+
+def _central_secure_boot_private_key() -> Path:
+    configured = env_value(CENTRAL_SECURE_BOOT_PRIVATE_KEY_ENV, "").strip()
+    if not configured:
+        raise RuntimeError(
+            "Central-Publish abgebrochen: "
+            f"{CENTRAL_SECURE_BOOT_PRIVATE_KEY_ENV} ist nicht gesetzt."
+        )
+    key_path = Path(configured)
+    if not key_path.is_absolute():
+        raise RuntimeError(
+            "Der Central-Secure-Boot-Schluessel muss als absoluter Pfad "
+            "konfiguriert werden."
+        )
+    try:
+        resolved = key_path.resolve(strict=True)
+    except OSError:
+        raise RuntimeError(
+            "Der konfigurierte Central-Secure-Boot-Schluessel ist nicht lesbar."
+        ) from None
+    if not resolved.is_file():
+        raise RuntimeError(
+            "Der konfigurierte Central-Secure-Boot-Schluessel ist keine regulaere Datei."
+        )
+    if _path_is_inside_git_repository(resolved):
+        raise RuntimeError(
+            "Der Central-Secure-Boot-Schluessel darf nicht in einem Git-Repository liegen."
+        )
+    try:
+        key_permissions = resolved.stat().st_mode & 0o777
+    except OSError:
+        raise RuntimeError(
+            "Der konfigurierte Central-Secure-Boot-Schluessel ist nicht lesbar."
+        ) from None
+    if key_permissions != 0o600:
+        raise RuntimeError(
+            "Der Central-Secure-Boot-Schluessel darf nur fuer den aktuellen "
+            "Benutzer lesbar sein (Dateimodus 0600)."
+        )
+    return resolved
+
+
+def _run_central_image_tool(arguments: list[str]) -> dict[str, object]:
+    if not CENTRAL_IMAGE_TOOL.is_file():
+        raise RuntimeError(
+            "Central-Publish abgebrochen: Das verbindliche image_tool.py fehlt."
+        )
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(CENTRAL_IMAGE_TOOL), *arguments],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=300,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise RuntimeError(
+            "Central-Secure-Boot-Pruefung konnte nicht ausgefuehrt werden."
+        ) from None
+    if completed.returncode != 0:
+        # stderr can contain the private key path. Deliberately do not include it.
+        raise RuntimeError(
+            "Central-Secure-Boot-Pruefung oder -Signierung wurde abgelehnt."
+        )
+    try:
+        result = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "Central image_tool.py hat kein gueltiges Pruefergebnis geliefert."
+        ) from exc
+    if not isinstance(result, dict):
+        raise RuntimeError(
+            "Central image_tool.py hat kein gueltiges Pruefergebnis geliefert."
+        )
+    return result
+
+
+def _assert_central_image_identity(
+    info: dict[str, object],
+    expected_sequence: int,
+    *,
+    require_verified_signature: bool,
+) -> None:
+    expected: dict[str, object] = {
+        "image_kind": CENTRAL_EXPECTED_IMAGE_KIND,
+        "hardware": CENTRAL_EXPECTED_HARDWARE,
+        "release_sequence": expected_sequence,
+        "policy_version": 1,
+    }
+    mismatches = [name for name, value in expected.items() if info.get(name) != value]
+    if mismatches:
+        raise RuntimeError(
+            "Central-ImageIdentity passt nicht zum Produktionsrelease: "
+            + ", ".join(mismatches)
+            + "."
+        )
+    generation = info.get("security_generation")
+    if not isinstance(generation, int) or not 0 <= generation <= 16:
+        raise RuntimeError("Central-ImageIdentity enthaelt keine gueltige Security-Generation.")
+    if require_verified_signature:
+        if (
+            info.get("signature_present") is not True
+            or info.get("signature_verified") is not True
+            or info.get("signature_scheme") != CENTRAL_EXPECTED_SIGNATURE_SCHEME
+        ):
+            raise RuntimeError(
+                "Central-Produktionsimage besitzt keine verifizierte RSA-3072-"
+                "Secure-Boot-V2-Signatur."
+            )
+
+
+def _new_private_central_artifact_path(version: str) -> tuple[Path, Path]:
+    DROP_DIR.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix=".central-sbv2-", dir=DROP_DIR))
+    directory.chmod(0o700)
+    output = directory / make_drop_filename("central", version)
+    if output.exists():
+        raise RuntimeError("Privater Central-Stagingpfad ist unerwartet bereits belegt.")
+    return directory, output
+
+
+def _copy_private_without_clobber(source: Path, destination: Path) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(destination, flags, 0o600)
+    try:
+        with source.open("rb") as input_handle, os.fdopen(
+            descriptor, "wb", closefd=False
+        ) as output_handle:
+            shutil.copyfileobj(input_handle, output_handle, length=65536)
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
+    except Exception:
+        try:
+            destination.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        os.close(descriptor)
+
+
+def _remove_private_central_artifact(directory: Path, artifact: Path) -> None:
+    try:
+        artifact.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+
+
+def _central_staging_paths(
+    summary: dict[str, object],
+) -> tuple[Path, Path] | None:
+    raw_directory = summary.get("_central_private_staging_dir")
+    raw_artifact = summary.get("file_path")
+    if raw_directory is None or raw_artifact is None:
+        return None
+    directory = Path(raw_directory)
+    artifact = Path(raw_artifact)
+    try:
+        drop_directory = DROP_DIR.resolve()
+        resolved_directory = directory.resolve(strict=False)
+        resolved_artifact = artifact.resolve(strict=False)
+    except OSError:
+        return None
+    if (
+        resolved_directory.parent != drop_directory
+        or not resolved_directory.name.startswith(".central-sbv2-")
+        or resolved_artifact.parent != resolved_directory
+    ):
+        return None
+    return resolved_directory, resolved_artifact
+
+
+def cleanup_prepared_release(summary: dict[str, object]) -> None:
+    """Remove only Publisher-owned private Central staging files."""
+    paths = _central_staging_paths(summary)
+    if paths is None:
+        return
+    directory, artifact = paths
+    _remove_private_central_artifact(directory, artifact)
+    summary.pop("_central_private_staging_dir", None)
+
+
+def _prepare_central_secure_boot_artifact(
+    source: Path,
+    version: str,
+    release_sequence: int,
+    artifact_origin: str,
+) -> tuple[Path, dict[str, object], Path]:
+    if not source.is_file():
+        raise RuntimeError(f"Central-Build-Artefakt fehlt: {source}")
+    key_path = _central_secure_boot_private_key()
+    inspected = _run_central_image_tool([str(source)])
+    _assert_central_image_identity(
+        inspected,
+        release_sequence,
+        require_verified_signature=False,
+    )
+
+    signature_present = inspected.get("signature_present") is True
+    if artifact_origin == "build" and signature_present:
+        raise RuntimeError(
+            "Ein frischer Central-Build muss unsigniert an den Publisher uebergeben "
+            "werden; das Artefakt war bereits signiert."
+        )
+    if artifact_origin != "build" and not env_bool(
+        "OTA_ALLOW_EXISTING_SIGNED_BIN", False
+    ):
+        raise RuntimeError(
+            "Central-Produktionsreleases duerfen nur aus einem frischen Publisher-Build "
+            "stammen. Ein vorhandenes, bereits signiertes BIN erfordert den bewusst "
+            "kontrollierten Ausnahmefall OTA_ALLOW_EXISTING_SIGNED_BIN=1."
+        )
+    if artifact_origin != "build" and not signature_present:
+        raise RuntimeError(
+            "Der Ausnahmeweg akzeptiert nur ein bereits RSA-3072-signiertes Central-BIN; "
+            "beliebige vorhandene BIN-Dateien werden nicht nachsigniert."
+        )
+
+    directory, signed_output = _new_private_central_artifact_path(version)
+    try:
+        if artifact_origin == "build":
+            signed_info = _run_central_image_tool(
+                [
+                    str(source),
+                    "--sign-key",
+                    str(key_path),
+                    "--output",
+                    str(signed_output),
+                    "--audience",
+                    "customer",
+                ]
+            )
+        else:
+            verified_source = _run_central_image_tool(
+                [str(source), "--verify-key", str(key_path)]
+            )
+            _assert_central_image_identity(
+                verified_source,
+                release_sequence,
+                require_verified_signature=True,
+            )
+            _copy_private_without_clobber(source, signed_output)
+            signed_info = _run_central_image_tool(
+                [str(signed_output), "--verify-key", str(key_path)]
+            )
+
+        _assert_central_image_identity(
+            signed_info,
+            release_sequence,
+            require_verified_signature=True,
+        )
+        if (signed_output.stat().st_mode & 0o777) != 0o600:
+            raise RuntimeError("Central-Secure-Boot-Artefakt besitzt nicht Modus 0600.")
+        return signed_output, signed_info, directory
+    except Exception:
+        _remove_private_central_artifact(directory, signed_output)
+        raise
+
+
+def _verify_prepared_central_secure_boot(
+    summary: dict[str, object],
+    file_path: Path,
+) -> None:
+    if str(summary.get("target", "")) != "central":
+        return
+    if summary.get("central_secure_boot_verified") is not True:
+        raise RuntimeError(
+            "Central-Publish abgebrochen: verifizierte Secure-Boot-Signierung fehlt."
+        )
+    try:
+        expected_sequence = int(summary["release_sequence"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "Central-Publish abgebrochen: Release-Sequenz fehlt."
+        ) from exc
+    key_path = _central_secure_boot_private_key()
+    verified = _run_central_image_tool(
+        [str(file_path), "--verify-key", str(key_path)]
+    )
+    _assert_central_image_identity(
+        verified,
+        expected_sequence,
+        require_verified_signature=True,
+    )
+    for field in (
+        "image_kind",
+        "hardware",
+        "release_sequence",
+        "security_generation",
+        "policy_version",
+        "signature_scheme",
+    ):
+        if summary.get(f"central_{field}") != verified.get(field):
+            raise RuntimeError(
+                "Central-Secure-Boot-Metadaten wurden nach der Vorbereitung veraendert."
+            )
 
 
 def slugify(text: str) -> str:
@@ -572,7 +891,7 @@ def archive_release_record(
     record = {
         key: str(value) if isinstance(value, Path) else value
         for key, value in summary.items()
-        if key not in excluded
+        if key not in excluded and not key.startswith("_")
     }
     record["release"] = release
     record["archived_path"] = str(archived_path)
@@ -655,41 +974,90 @@ def prepare_release(
     artifact_origin: str = "existing",
 ) -> dict[str, object]:
     supabase_url, _service_role_key, bucket = ensure_setup()
-    summary = build_release_summary(
-        supabase_url=supabase_url,
-        bucket=bucket,
-        file_path=file_path,
-        target=target,
-        version=version,
-        notes=notes,
-        mandatory=mandatory,
-        release_sequence=release_sequence,
-    )
-
+    normalized_target = target.strip().lower()
+    if normalized_target not in {"basic", "central"}:
+        raise RuntimeError("Target muss 'basic' oder 'central' sein.")
+    if artifact_origin not in {"build", "existing"}:
+        raise RuntimeError("Artefakt-Ursprung muss 'build' oder 'existing' sein.")
     mode = signing_mode()
-    summary["signing_mode"] = mode
-    summary["artifact_origin"] = artifact_origin
-    summary["signed"] = False
+    central_staging_directory: Path | None = None
+    prepared_file_path = file_path
+    central_info: dict[str, object] | None = None
 
-    if mode == SIGNING_MODE_DISABLED:
-        return summary
-
-    if artifact_origin != "build" and not env_bool("OTA_ALLOW_EXISTING_SIGNED_BIN", False):
-        raise RuntimeError(
-            "Signierte Produktionsreleases duerfen nur aus einem frischen Publisher-Build "
-            "stammen. Fuer einen bewusst kontrollierten Ausnahmefall muss "
-            "OTA_ALLOW_EXISTING_SIGNED_BIN=1 gesetzt werden."
+    if normalized_target == "central":
+        if (
+            not isinstance(release_sequence, int)
+            or isinstance(release_sequence, bool)
+            or not 1 <= release_sequence <= 0xFFFFFFFFFFFFFFFF
+        ):
+            raise RuntimeError(
+                "Fuer jedes Central-Produktionsimage ist eine Release-Sequenz "
+                "groesser oder gleich 1 Pflicht."
+            )
+        prepared_file_path, central_info, central_staging_directory = (
+            _prepare_central_secure_boot_artifact(
+                file_path,
+                version,
+                release_sequence,
+                artifact_origin,
+            )
         )
-    if release_sequence is None:
-        raise RuntimeError(
-            "Fuer ein signiertes Release fehlt die monotone Release-Sequenz."
-        )
-    summary["embedded_release_sequence"] = assert_embedded_release_sequence(
-        file_path,
-        release_sequence,
-    )
 
     try:
+        summary = build_release_summary(
+            supabase_url=supabase_url,
+            bucket=bucket,
+            file_path=prepared_file_path,
+            target=normalized_target,
+            version=version,
+            notes=notes,
+            mandatory=mandatory,
+            release_sequence=release_sequence,
+        )
+        summary["signing_mode"] = mode
+        summary["artifact_origin"] = artifact_origin
+        summary["signed"] = False
+
+        if central_info is not None and central_staging_directory is not None:
+            summary["_central_private_staging_dir"] = central_staging_directory
+            summary["central_secure_boot_verified"] = True
+            for field in (
+                "image_kind",
+                "hardware",
+                "release_sequence",
+                "security_generation",
+                "policy_version",
+                "signature_scheme",
+            ):
+                summary[f"central_{field}"] = central_info[field]
+            # Central's fixed descriptor is verified by image_tool against the
+            # signed image. The old CCFWSEQ1 marker may be removed by the linker
+            # now that the Central runtime reads its sequence from that descriptor.
+            summary["embedded_release_sequence"] = central_info["release_sequence"]
+
+        if mode == SIGNING_MODE_DISABLED:
+            return summary
+
+        if (
+            normalized_target == "basic"
+            and artifact_origin != "build"
+            and not env_bool("OTA_ALLOW_EXISTING_SIGNED_BIN", False)
+        ):
+            raise RuntimeError(
+                "Signierte Produktionsreleases duerfen nur aus einem frischen Publisher-Build "
+                "stammen. Fuer einen bewusst kontrollierten Ausnahmefall muss "
+                "OTA_ALLOW_EXISTING_SIGNED_BIN=1 gesetzt werden."
+            )
+        if release_sequence is None:
+            raise RuntimeError(
+                "Fuer ein signiertes Release fehlt die monotone Release-Sequenz."
+            )
+        if normalized_target == "basic":
+            summary["embedded_release_sequence"] = assert_embedded_release_sequence(
+                prepared_file_path,
+                release_sequence,
+            )
+
         config = signing_config_from_values(env_value)
         manifest = ReleaseManifest(
             target=str(summary["target"]),
@@ -705,13 +1073,24 @@ def prepare_release(
             raise SigningError(
                 "Die Key-ID passt nicht zum Fingerprint des oeffentlichen Schluessels."
             )
+        summary.update(signed_manifest.to_dict())
+        summary["public_key_fingerprint"] = fingerprint
+        summary["signed"] = True
+        return summary
     except SigningError as exc:
+        if central_staging_directory is not None:
+            _remove_private_central_artifact(
+                central_staging_directory,
+                prepared_file_path,
+            )
         raise RuntimeError(f"Firmware-Signatur fehlgeschlagen: {exc}") from exc
-
-    summary.update(signed_manifest.to_dict())
-    summary["public_key_fingerprint"] = fingerprint
-    summary["signed"] = True
-    return summary
+    except Exception:
+        if central_staging_directory is not None:
+            _remove_private_central_artifact(
+                central_staging_directory,
+                prepared_file_path,
+            )
+        raise
 
 
 def _assert_prepared_artifact_unchanged(summary: dict[str, object]) -> Path:
@@ -886,82 +1265,86 @@ def preflight_release(
 
 
 def publish_prepared_release(summary: dict[str, object]) -> dict[str, object]:
-    supabase_url, service_role_key, bucket = ensure_setup()
-    file_path = _assert_prepared_artifact_unchanged(summary)
-    _verify_prepared_signature(summary)
-    expected_object_path = (
-        f"{summary['target']}/sha256/{summary['sha256']}.bin"
-    )
-    if str(summary["object_path"]) != expected_object_path:
-        raise RuntimeError(
-            "Vorbereiteter Storage-Pfad ist nicht content-addressed oder passt "
-            "nicht zu Target und SHA256."
+    try:
+        supabase_url, service_role_key, bucket = ensure_setup()
+        file_path = _assert_prepared_artifact_unchanged(summary)
+        _verify_prepared_central_secure_boot(summary, file_path)
+        _verify_prepared_signature(summary)
+        expected_object_path = (
+            f"{summary['target']}/sha256/{summary['sha256']}.bin"
         )
-    if str(summary["storage_path"]) != f"{bucket}/{expected_object_path}":
-        raise RuntimeError("Vorbereiteter Storage-Pfad passt nicht zum aktiven Bucket.")
+        if str(summary["object_path"]) != expected_object_path:
+            raise RuntimeError(
+                "Vorbereiteter Storage-Pfad ist nicht content-addressed oder passt "
+                "nicht zu Target und SHA256."
+            )
+        if str(summary["storage_path"]) != f"{bucket}/{expected_object_path}":
+            raise RuntimeError("Vorbereiteter Storage-Pfad passt nicht zum aktiven Bucket.")
 
-    existing = preflight_release(supabase_url, service_role_key, summary)
-    upload_immutable_artifact(
-        supabase_url,
-        service_role_key,
-        bucket,
-        str(summary["object_path"]),
-        file_path,
-        int(summary["file_size"]),
-        str(summary["sha256"]),
-    )
-
-    if existing is None:
-        release = insert_unpublished_release(
+        existing = preflight_release(supabase_url, service_role_key, summary)
+        upload_immutable_artifact(
             supabase_url,
             service_role_key,
-            summary,
+            bucket,
+            str(summary["object_path"]),
+            file_path,
+            int(summary["file_size"]),
+            str(summary["sha256"]),
         )
-        _assert_release_row_matches(
-            summary,
-            release,
-            expected_published=False,
-        )
-    else:
-        release = existing
 
-    if bool(release.get("published")):
-        published_release = release
-    else:
-        release_id = str(release.get("id", ""))
-        if not release_id:
-            raise RuntimeError("Supabase-Release besitzt keine gueltige ID.")
-        readback_release = fetch_release_by_id(
-            supabase_url,
-            service_role_key,
-            release_id,
-        )
-        _assert_release_row_matches(
-            summary,
-            readback_release,
-            expected_published=False,
-        )
-        published_release = mark_release_published(
-            supabase_url,
-            service_role_key,
-            release_id,
-        )
-        _assert_release_row_matches(
+        if existing is None:
+            release = insert_unpublished_release(
+                supabase_url,
+                service_role_key,
+                summary,
+            )
+            _assert_release_row_matches(
+                summary,
+                release,
+                expected_published=False,
+            )
+        else:
+            release = existing
+
+        if bool(release.get("published")):
+            published_release = release
+        else:
+            release_id = str(release.get("id", ""))
+            if not release_id:
+                raise RuntimeError("Supabase-Release besitzt keine gueltige ID.")
+            readback_release = fetch_release_by_id(
+                supabase_url,
+                service_role_key,
+                release_id,
+            )
+            _assert_release_row_matches(
+                summary,
+                readback_release,
+                expected_published=False,
+            )
+            published_release = mark_release_published(
+                supabase_url,
+                service_role_key,
+                release_id,
+            )
+            _assert_release_row_matches(
+                summary,
+                published_release,
+                expected_published=True,
+            )
+
+        archived_path = archive_uploaded_file(file_path, slugify(str(summary["version"])))
+        release_record_path = archive_release_record(
             summary,
             published_release,
-            expected_published=True,
+            archived_path,
         )
-
-    archived_path = archive_uploaded_file(file_path, slugify(str(summary["version"])))
-    release_record_path = archive_release_record(
-        summary,
-        published_release,
-        archived_path,
-    )
-    summary["release"] = published_release
-    summary["archived_path"] = archived_path
-    summary["release_record_path"] = release_record_path
-    return summary
+        summary["release"] = published_release
+        summary["archived_path"] = archived_path
+        summary["release_record_path"] = release_record_path
+        return summary
+    finally:
+        cleanup_prepared_release(summary)
 
 
 def publish_release(
@@ -1023,7 +1406,7 @@ def main() -> int:
     except RuntimeError as exc:
         print(f"Fehler: {exc}")
         return 1
-    if mode == SIGNING_MODE_REQUIRED:
+    if mode == SIGNING_MODE_REQUIRED or target.strip().lower() == "central":
         sequence_default = default_release_sequence(target)
         while release_sequence is None:
             sequence_text = prompt("Release-Sequenz", sequence_default)
@@ -1061,16 +1444,23 @@ def main() -> int:
     print(f"  SHA256:       {summary['sha256']}")
     print(f"  Storage-Pfad: {summary['storage_path']}")
     print(f"  Public URL:   {summary['public_url']}")
+    if summary.get("central_secure_boot_verified") is True:
+        print(
+            "  Secure Boot:  ja "
+            f"({summary['central_signature_scheme']}, "
+            f"Security-Generation {summary['central_security_generation']})"
+        )
     if summary["signed"]:
         print(f"  Signiert:     ja ({summary['signature_algorithm']})")
         print(f"  Key-ID:       {summary['signing_key_id']}")
         print(f"  Sequenz:      {summary['release_sequence']}")
         print(f"  Key-Fingerprint: {summary['public_key_fingerprint']}")
     else:
-        print("  Signiert:     NEIN - Legacy-/Vorbereitungsmodus")
+        print("  Manifest:     NICHT ECDSA-signiert - Legacy-/Vorbereitungsmodus")
     print()
 
     if not prompt_bool("Jetzt veroeffentlichen", True):
+        cleanup_prepared_release(summary)
         print("Abgebrochen.")
         return 0
 

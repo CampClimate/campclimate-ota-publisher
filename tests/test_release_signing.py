@@ -194,7 +194,7 @@ class ReleaseSigningTests(unittest.TestCase):
         ):
             summary = publisher.prepare_release(
                 file_path=firmware,
-                target="central",
+                target="basic",
                 version="2.0.1.10",
                 notes="Test",
                 mandatory=False,
@@ -233,7 +233,7 @@ class ReleaseSigningTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 publisher.prepare_release(
                     file_path=firmware,
-                    target="central",
+                    target="basic",
                     version="2.0.1.10",
                     notes="Test",
                     mandatory=False,
@@ -263,7 +263,7 @@ class ReleaseSigningTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "genau eine"):
                 publisher.prepare_release(
                     file_path=missing,
-                    target="central",
+                    target="basic",
                     version="2.0.1.10",
                     notes="Test",
                     mandatory=False,
@@ -273,7 +273,7 @@ class ReleaseSigningTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "BIN=9"):
                 publisher.prepare_release(
                     file_path=mismatched,
-                    target="central",
+                    target="basic",
                     version="2.0.1.10",
                     notes="Test",
                     mandatory=False,
@@ -470,7 +470,7 @@ class ReleaseSigningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, environment, clear=False):
             summary = publisher.prepare_release(
                 file_path=firmware,
-                target="central",
+                target="basic",
                 version="2.0.1.10",
                 notes="Staged test",
                 mandatory=False,

@@ -314,8 +314,14 @@ class PublisherGui:
                 raise RuntimeError("Release-Sequenz muss eine ganze Zahl sein.") from exc
             if release_sequence < 1:
                 raise RuntimeError("Release-Sequenz muss groesser oder gleich 1 sein.")
-        if publisher.signing_mode() == publisher.SIGNING_MODE_REQUIRED and release_sequence is None:
-            raise RuntimeError("Fuer signierte Releases ist die Release-Sequenz Pflicht.")
+        if (
+            publisher.signing_mode() == publisher.SIGNING_MODE_REQUIRED
+            or target == "central"
+        ) and release_sequence is None:
+            raise RuntimeError(
+                "Fuer Central sowie fuer ECDSA-signierte Releases ist die "
+                "Release-Sequenz Pflicht."
+            )
         if (
             publisher.signing_mode() == publisher.SIGNING_MODE_REQUIRED
             and self.mode_var.get() == "build"
@@ -369,6 +375,8 @@ class PublisherGui:
         release_sequence: int | None,
         artifact_origin: str,
     ) -> None:
+        summary: dict[str, object] | None = None
+        staged_bin: Path | None = None
         try:
             if artifact_origin == "build":
                 self.event_queue.put(("status", f"{TARGET_CONFIGS[target]['label']} wird aus den aktuellen Quellen gebaut..."))
@@ -403,6 +411,14 @@ class PublisherGui:
             self.event_queue.put(("log", f"  Mandatory: {summary['mandatory']}\n"))
             self.event_queue.put(("log", f"  SHA256: {summary['sha256']}\n"))
             self.event_queue.put(("log", f"  Public URL: {summary['public_url']}\n"))
+            if summary.get("central_secure_boot_verified") is True:
+                self.event_queue.put(
+                    (
+                        "log",
+                        "  Secure Boot: RSA-3072 verifiziert "
+                        f"(Security-Generation {summary['central_security_generation']})\n",
+                    )
+                )
             if summary["signed"]:
                 self.event_queue.put(
                     ("log", f"  Signatur: {summary['signature_algorithm']}\n")
@@ -419,7 +435,11 @@ class PublisherGui:
                 )
             else:
                 self.event_queue.put(
-                    ("log", "  Signatur: DEAKTIVIERT (Legacy-/Vorbereitungsmodus)\n")
+                    (
+                        "log",
+                        "  Manifest-Signatur: DEAKTIVIERT "
+                        "(Legacy-/Vorbereitungsmodus)\n",
+                    )
                 )
             self.event_queue.put(("status", "Upload nach Supabase laeuft..."))
 
@@ -437,6 +457,14 @@ class PublisherGui:
         except Exception as exc:
             self.event_queue.put(("error", str(exc)))
         finally:
+            if summary is not None:
+                publisher.cleanup_prepared_release(summary)
+            if target == "central" and staged_bin is not None:
+                try:
+                    if staged_bin.resolve().parent == publisher.DROP_DIR.resolve():
+                        staged_bin.unlink(missing_ok=True)
+                except OSError:
+                    pass
             self.event_queue.put(("done", None))
 
     def process_events(self) -> None:
