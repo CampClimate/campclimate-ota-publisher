@@ -48,8 +48,8 @@ class ReleaseManifest:
             raise SigningError(
                 f"Nicht unterstuetzter Signaturalgorithmus: {self.signature_algorithm}"
             )
-        if self.target not in {"basic", "central"}:
-            raise SigningError("Target muss 'basic' oder 'central' sein.")
+        if self.target not in {"basic", "central", "outdoor"}:
+            raise SigningError("Target muss 'basic', 'central' oder 'outdoor' sein.")
         if not _VERSION_RE.fullmatch(self.version):
             raise SigningError(
                 "Version darf nur Buchstaben, Zahlen, Punkt, Unterstrich, Plus und Minus enthalten."

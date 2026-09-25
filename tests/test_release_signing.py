@@ -152,6 +152,32 @@ class ReleaseSigningTests(unittest.TestCase):
         with self.assertRaises(SigningError):
             verify_manifest(changed, self.public_key)
 
+    def test_outdoor_release_is_not_a_basic_release(self) -> None:
+        outdoor = ReleaseManifest(
+            target="outdoor",
+            version="Outdoor_1.0.0.1",
+            release_sequence=11,
+            file_size_bytes=123456,
+            sha256="ab" * 32,
+            signing_key_id=self.key_id,
+        )
+        signed = sign_manifest(outdoor, self.config, passphrase=self.PASSPHRASE)
+        verify_manifest(signed, self.public_key)
+        basic = ReleaseManifest(
+            target="basic",
+            version=outdoor.version,
+            release_sequence=outdoor.release_sequence,
+            file_size_bytes=outdoor.file_size_bytes,
+            sha256=outdoor.sha256,
+            signing_key_id=self.key_id,
+        )
+        with self.assertRaises(SigningError):
+            verify_manifest(
+                SignedReleaseManifest(manifest=basic, signature_base64=signed.signature_base64),
+                self.public_key,
+            )
+        self.assertEqual(publisher.infer_target("Outdoor_1.0.0.1.bin"), "outdoor")
+
     def test_invalid_manifest_fields_are_rejected(self) -> None:
         with self.assertRaises(SigningError):
             ReleaseManifest(

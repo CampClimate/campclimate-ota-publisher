@@ -161,6 +161,8 @@ def infer_target(file_name: str) -> str:
         return "central"
     if lowered.startswith("basic_"):
         return "basic"
+    if lowered.startswith("outdoor_"):
+        return "outdoor"
     return ""
 
 
@@ -937,8 +939,8 @@ def build_release_summary(
     release_sequence: int | None = None,
 ) -> dict[str, object]:
     normalized_target = target.strip().lower()
-    if normalized_target not in {"basic", "central"}:
-        raise RuntimeError("Target muss 'basic' oder 'central' sein.")
+    if normalized_target not in {"basic", "central", "outdoor"}:
+        raise RuntimeError("Target muss 'basic', 'central' oder 'outdoor' sein.")
     normalized_version = version.strip()
     if not normalized_version:
         raise RuntimeError("Version darf nicht leer sein.")
@@ -975,8 +977,8 @@ def prepare_release(
 ) -> dict[str, object]:
     supabase_url, _service_role_key, bucket = ensure_setup()
     normalized_target = target.strip().lower()
-    if normalized_target not in {"basic", "central"}:
-        raise RuntimeError("Target muss 'basic' oder 'central' sein.")
+    if normalized_target not in {"basic", "central", "outdoor"}:
+        raise RuntimeError("Target muss 'basic', 'central' oder 'outdoor' sein.")
     if artifact_origin not in {"build", "existing"}:
         raise RuntimeError("Artefakt-Ursprung muss 'build' oder 'existing' sein.")
     mode = signing_mode()
@@ -1039,7 +1041,7 @@ def prepare_release(
             return summary
 
         if (
-            normalized_target == "basic"
+            normalized_target in {"basic", "outdoor"}
             and artifact_origin != "build"
             and not env_bool("OTA_ALLOW_EXISTING_SIGNED_BIN", False)
         ):
@@ -1052,7 +1054,7 @@ def prepare_release(
             raise RuntimeError(
                 "Fuer ein signiertes Release fehlt die monotone Release-Sequenz."
             )
-        if normalized_target == "basic":
+        if normalized_target in {"basic", "outdoor"}:
             summary["embedded_release_sequence"] = assert_embedded_release_sequence(
                 prepared_file_path,
                 release_sequence,

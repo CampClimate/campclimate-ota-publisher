@@ -31,7 +31,7 @@ campclimate-firmware-release
 manifest_version=1
 signature_algorithm=ecdsa-p256-sha256
 signing_key_id=<key-id>
-target=<basic|central>
+target=<basic|central|outdoor>
 version=<firmware-version>
 release_sequence=<monotone-ganzzahl>
 file_size_bytes=<dateigroesse>
@@ -73,10 +73,10 @@ zusaetzlichen RSA-Schicht unberuehrt.
 
 `release_sequence` ist pro Target streng monoton:
 
-- Basic und Central haben getrennte Sequenzen.
+- Basic, Central und Outdoor haben getrennte Sequenzen.
 - Der Publisher verlangt fuer neue Releases eine groessere Sequenz als im
   veroeffentlichten Katalog; identische Releases koennen idempotent wiederholt werden.
-- Basic verlangt auf dem Geraet eine strikt groessere Sequenz. Central erlaubt
+- Basic und Outdoor verlangen auf dem Geraet eine strikt groessere Sequenz. Central erlaubt
   die erneute Installation derselben Sequenz, aber keinen Produktions-Downgrade.
 - Kunden-Recovery installiert ebenfalls nur Produktion ab der bestaetigten
   Releaseuntergrenze. Private Factory- und Recovery-Imageklassen erhalten
@@ -88,7 +88,7 @@ Central-BINs inzwischen fuer Hardware Secure Boot signieren. Die kontrollierte
 Aktivierung der eFuses, Flash Encryption und der Hardware-Anti-Rollback-Policy
 bleiben getrennte Produktionsschritte mit eigenem Hardware-Nachweis.
 
-Die Sequenz ist im Firmware-BIN enthalten. Basic-Produktionsbuilds enthalten
+Die Sequenz ist im Firmware-BIN enthalten. Basic- und Outdoor-Produktionsbuilds enthalten
 genau eine Marke:
 
 ```text
@@ -96,11 +96,11 @@ CCFWSEQ1<little-endian uint64 release_sequence>
 ```
 
 Central verwendet den 64-Byte-Deskriptor `CCIMG001` an Offset 288. Dessen Wert
-wird vom Imagewerkzeug gegen das signierte Image geprueft; die alte
+wird vom Imagewerkzeug gegen das signierte Image geprueft; die
 `CCFWSEQ1`-Marke ist bei Central keine Voraussetzung mehr.
 
 Der Publisher setzt `CAMPCLIMATE_RELEASE_SEQUENCE` beim Build und verweigert
-die Signatur, wenn Deskriptor beziehungsweise Basic-Marke nicht passen. Zusaetzlich wird die
+die Signatur, wenn Deskriptor beziehungsweise Basic-/Outdoor-Marke nicht passen. Zusaetzlich wird die
 Sequenz gegen den hoechsten signierten Supabase-Stand desselben Targets
 geprueft.
 
@@ -159,7 +159,7 @@ Im Modus `OTA_SIGNING_MODE=required`:
 4. bei Central das unsignierte BIN mit RSA-3072 signieren und sofort mit
    `espsecure.py` verifizieren.
 5. eingebetteten Sequenzwert aus dem Central-Deskriptor beziehungsweise der
-   eindeutigen Basic-BIN-Marke pruefen.
+   eindeutigen Basic-/Outdoor-BIN-Marke pruefen.
 6. Dateigroesse und SHA256 des auszuliefernden BIN bestimmen.
 7. kanonisches Manifest erzeugen.
 8. Passphrase aus dem macOS-Schluesselbund lesen.

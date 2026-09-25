@@ -34,7 +34,9 @@ OTA_SIGNING_MODE=required
 ```
 
 Central, Basic, App und beide Factory-Installer pruefen den gemeinsamen
-Signaturvertrag.
+Signaturvertrag. Der Outdoor-Publisherpfad ist vorbereitet; Outdoor-OTA darf erst
+freigegeben werden, wenn Empfaenger, Central-Dispatch und Zielpruefung
+end-to-end verifiziert sind.
 
 Central besitzt zusaetzlich eine zweite, getrennte Signaturschicht: Das
 ESP32-S3-Anwendungsimage wird mit RSA-3072 im Secure-Boot-V2-Format signiert.
@@ -77,13 +79,14 @@ Oder per Doppelklick:
 
 Die GUI kann:
 
-- `Basic` oder `Central` als OTA-Target waehlen
+- `Basic`, `Central` oder `Outdoor` als OTA-Target waehlen
 - eine `Release-Art` setzen
 - Version, Bezeichnung / Notes und `mandatory` pflegen
 - eine vorhandene `.bin` verwenden
 - oder die aktuelle Produktions-Firmware frisch aus den Sources bauen
   - `Basic V2.0` via `basic-v2`
   - `Central 2.0` via `central-production`
+  - `CampClimate Outdoor` via `outdoor`
 - danach den vorhandenen Upload-Prozess nach Supabase ausfuehren
 
 Im Signatur-Pflichtmodus gilt:
@@ -95,8 +98,9 @@ Im Signatur-Pflichtmodus gilt:
 - vorhandene beliebige BIN-Dateien werden abgelehnt
 - vor dem Upload werden Datei, Hash und Signatur erneut geprueft
 - der Build erhaelt `CAMPCLIMATE_RELEASE_SEQUENCE`
-- Basic muss genau eine `CCFWSEQ1`-Marke mit demselben 64-Bit-Sequenzwert
-  enthalten; Central verwendet den festen, RSA-verifizierten `CCIMG001`-Deskriptor
+- Basic und Outdoor muessen jeweils genau eine `CCFWSEQ1`-Marke mit demselben
+  64-Bit-Sequenzwert enthalten; Central verwendet den festen,
+  RSA-verifizierten `CCIMG001`-Deskriptor
 
 Fuer Central gilt unabhaengig vom Manifestmodus zusaetzlich:
 

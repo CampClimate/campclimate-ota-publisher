@@ -32,6 +32,14 @@ TARGET_CONFIGS = {
         "version_file": PROJECTS_ROOT / "CampClimate Basic V2.0" / "platformio.ini",
         "version_regex": re.compile(r'CAMPCLIMATE_BASIC_FW_VERSION=\\?"?([^"\\\s]+)\\?"?'),
     },
+    "outdoor": {
+        "label": "Outdoor",
+        "project_dir": PROJECTS_ROOT / "CampClimate Outdoor",
+        "env": "outdoor",
+        "build_dir": Path("/tmp/campclimate_ota_publisher_outdoor"),
+        "version_file": PROJECTS_ROOT / "CampClimate Outdoor" / "platformio.ini",
+        "version_regex": re.compile(r'CAMPCLIMATE_OUTDOOR_FW_VERSION=\\?"?([^"\\\s]+)\\?"?'),
+    },
     "central": {
         "label": "Central",
         "project_dir": PROJECTS_ROOT / "CampClimate Central 2.0",
@@ -124,6 +132,7 @@ class PublisherGui:
         target_box.grid(row=0, column=1, sticky="w")
         ttk.Radiobutton(target_box, text="Basic", value="basic", variable=self.target_var, command=self.refresh_defaults).grid(row=0, column=0, sticky="w")
         ttk.Radiobutton(target_box, text="Central", value="central", variable=self.target_var, command=self.refresh_defaults).grid(row=0, column=1, sticky="w", padx=(10, 0))
+        ttk.Radiobutton(target_box, text="Outdoor", value="outdoor", variable=self.target_var, command=self.refresh_defaults).grid(row=0, column=2, sticky="w", padx=(10, 0))
 
         ttk.Label(form, text="Quelle").grid(row=0, column=2, sticky="w", padx=(18, 0))
         source_box = ttk.Frame(form)
@@ -302,7 +311,7 @@ class PublisherGui:
         release_sequence: int | None = None
 
         if target not in TARGET_CONFIGS:
-            raise RuntimeError("Bitte Basic oder Central auswaehlen.")
+            raise RuntimeError("Bitte Basic, Central oder Outdoor auswaehlen.")
         if not version:
             raise RuntimeError("Version darf nicht leer sein.")
         if not notes:
