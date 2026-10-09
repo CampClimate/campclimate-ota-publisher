@@ -65,6 +65,34 @@ Produktionsuploads verwendet werden.
 
 ## Nutzung
 
+### Verbindliche lokale Release-Abnahme
+
+Jeder OTA-Publish wird fail-closed durch eine lokale JSON-Akte abgenommen. Vor
+dem ersten Netzwerkzugriff und erneut unmittelbar vor dem Publish-PATCH muessen
+die drei Stufen in dieser Reihenfolge als `passed` bestaetigt sein:
+
+1. Softwaretests
+2. reale Test-Firmware auf dem TestFW-Board
+3. reale Produktions-Firmware im Fahrzeug
+
+Die Akte muss `schema_version: 1`, den exakten Target-/Versions-/Sequenz-/
+Groessen-/SHA256-/Mandatory-Kandidaten des vorbereiteten (bei Central: final
+RSA-signierten) BIN, lokale Evidenzdateien mit passenden SHA256-Hashes sowie
+eine menschliche Freigabe mit Zeitzonen-Zeitstempeln enthalten. Die Datei wird
+ueber `OTA_RELEASE_ACCEPTANCE_FILE` konfiguriert; relative Pfade beziehen sich
+auf dieses Publisher-Verzeichnis. Die Evidenzpfade sind relativ zum Ordner der
+Akte. Ein Beispiel mit absichtlich unbrauchbaren Pending-Platzhaltern liegt in
+[`release_acceptance.example.json`](release_acceptance.example.json).
+
+Die Bestaetigung ist eine manuelle menschliche Attestation. Sie authentifiziert
+die freigebende Person nicht und behauptet keine automatische Hardware-
+Validierung. Jede neue Build-/Signatur-Ausgabe kann den finalen BIN-Hash
+aendern; sobald sie ihn aendert, ist eine neue Akte erforderlich und eine alte
+Freigabe wird nicht uebernommen. Fuer eine gezielte Wiederaufnahme wird das
+bereits vorbereitete, final signierte BIN unveraendert aufbewahrt und mit
+`OTA_ALLOW_EXISTING_SIGNED_BIN=1` im bestehenden Signatur-/Pruefpfad erneut
+verwendet. Ein frischer GUI-Build traegt keine alte Akte weiter.
+
 ### GUI
 
 Fuer den einfachen Release-Alltag gibt es jetzt auch eine GUI:
@@ -134,7 +162,7 @@ Das Tool fragt dich dann nach:
 - Version
 - Bezeichnung / Notes
 - `mandatory`
-- fuer Central sowie bei aktivierter Manifestsignatur die monotone `Release-Sequenz`
+- die positive `Release-Sequenz` fuer die lokale Release-Abnahme
 
 ## Signaturschluessel vorbereiten
 

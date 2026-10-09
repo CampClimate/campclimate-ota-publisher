@@ -265,6 +265,9 @@ class CentralSecureBootPublishTests(unittest.TestCase):
             )
             staging_directory = Path(summary["_central_private_staging_dir"])
             with mock.patch(
+                "publisher._validate_release_acceptance",
+                return_value={"receipt_sha256": "test-receipt"},
+            ), mock.patch(
                 "publisher.preflight_release", side_effect=RuntimeError("offline test")
             ):
                 with self.assertRaisesRegex(RuntimeError, "offline test"):

@@ -528,6 +528,9 @@ class ReleaseSigningTests(unittest.TestCase):
             "publisher.preflight_release",
             side_effect=lambda *_args: events.append("preflight"),
         ), mock.patch(
+            "publisher._validate_release_acceptance",
+            return_value={"receipt_sha256": "test-receipt"},
+        ), mock.patch(
             "publisher.upload_immutable_artifact",
             side_effect=lambda *_args: events.append("upload"),
         ), mock.patch(

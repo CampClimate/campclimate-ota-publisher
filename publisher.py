@@ -31,6 +31,11 @@ from release_signing import (
     signing_config_from_values,
     verify_manifest,
 )
+from release_acceptance import (
+    ReleaseAcceptanceError,
+    receipt_path_from_env,
+    validate_release_acceptance,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -845,7 +850,37 @@ def insert_unpublished_release(
 
 def mark_release_published(supabase_url: str,
                            service_role_key: str,
-                           release_id: str) -> dict[str, object]:
+                           release_id: str,
+                           summary: dict[str, object]) -> dict[str, object]:
+    first_acceptance_snapshot = _validate_release_acceptance(summary)
+    supplied_acceptance_snapshot = summary.get("release_acceptance")
+    if (
+        supplied_acceptance_snapshot is not None
+        and supplied_acceptance_snapshot != first_acceptance_snapshot
+    ):
+        raise RuntimeError(
+            "Die gespeicherte lokale Release-Abnahme passt nicht zur aktuellen Akte."
+        )
+    summary["release_acceptance"] = first_acceptance_snapshot
+    current_release = fetch_release_by_id(
+        supabase_url,
+        service_role_key,
+        release_id,
+    )
+    if str(current_release.get("id", "")) != release_id:
+        raise RuntimeError("Supabase-Release-ID stimmt nicht mit dem Publish-Ziel ueberein.")
+    _assert_release_row_matches(
+        summary,
+        current_release,
+        expected_published=False,
+    )
+    if "file_path" in summary:
+        _assert_prepared_artifact_unchanged(summary)
+    final_acceptance_snapshot = _validate_release_acceptance(summary)
+    _assert_release_acceptance_stable(
+        first_acceptance_snapshot,
+        final_acceptance_snapshot,
+    )
     params = urllib.parse.urlencode(
         {
             "id": f"eq.{release_id}",
@@ -926,6 +961,25 @@ def ensure_setup() -> tuple[str, str, str]:
         )
 
     return supabase_url.rstrip("/"), service_role_key, bucket.strip()
+
+
+def _validate_release_acceptance(summary: dict[str, object]) -> dict[str, object]:
+    try:
+        receipt_path = receipt_path_from_env(env_value, root=ROOT)
+        snapshot = validate_release_acceptance(summary, receipt_path)
+    except (ReleaseAcceptanceError, OSError) as exc:
+        raise RuntimeError(f"Lokale Release-Abnahme abgelehnt: {exc}") from exc
+    return snapshot
+
+
+def _assert_release_acceptance_stable(
+    initial: dict[str, object],
+    final: dict[str, object],
+) -> None:
+    if initial != final:
+        raise RuntimeError(
+            "Lokale Release-Abnahme hat sich seit der ersten Pruefung veraendert."
+        )
 
 
 def build_release_summary(
@@ -1272,6 +1326,8 @@ def publish_prepared_release(summary: dict[str, object]) -> dict[str, object]:
         file_path = _assert_prepared_artifact_unchanged(summary)
         _verify_prepared_central_secure_boot(summary, file_path)
         _verify_prepared_signature(summary)
+        acceptance_snapshot = _validate_release_acceptance(summary)
+        summary["release_acceptance"] = acceptance_snapshot
         expected_object_path = (
             f"{summary['target']}/sha256/{summary['sha256']}.bin"
         )
@@ -1324,10 +1380,16 @@ def publish_prepared_release(summary: dict[str, object]) -> dict[str, object]:
                 readback_release,
                 expected_published=False,
             )
+            final_acceptance_snapshot = _validate_release_acceptance(summary)
+            _assert_release_acceptance_stable(
+                acceptance_snapshot,
+                final_acceptance_snapshot,
+            )
             published_release = mark_release_published(
                 supabase_url,
                 service_role_key,
                 release_id,
+                summary,
             )
             _assert_release_row_matches(
                 summary,
@@ -1404,22 +1466,23 @@ def main() -> int:
 
     release_sequence: int | None = None
     try:
-        mode = signing_mode()
+        signing_mode()
     except RuntimeError as exc:
         print(f"Fehler: {exc}")
         return 1
-    if mode == SIGNING_MODE_REQUIRED or target.strip().lower() == "central":
-        sequence_default = default_release_sequence(target)
-        while release_sequence is None:
-            sequence_text = prompt("Release-Sequenz", sequence_default)
-            try:
-                release_sequence = int(sequence_text)
-            except ValueError:
-                print("Release-Sequenz muss eine ganze Zahl sein.")
-                continue
-            if release_sequence < 1:
-                print("Release-Sequenz muss groesser oder gleich 1 sein.")
-                release_sequence = None
+    # The offline release-acceptance contract binds every target and signing
+    # mode to a positive candidate sequence, including legacy manifest mode.
+    sequence_default = default_release_sequence(target)
+    while release_sequence is None:
+        sequence_text = prompt("Release-Sequenz", sequence_default)
+        try:
+            release_sequence = int(sequence_text)
+        except ValueError:
+            print("Release-Sequenz muss eine ganze Zahl sein.")
+            continue
+        if release_sequence < 1:
+            print("Release-Sequenz muss groesser oder gleich 1 sein.")
+            release_sequence = None
 
     try:
         summary = prepare_release(

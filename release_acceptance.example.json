@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "candidate": {
+    "target": "basic",
+    "version": "REPLACE_WITH_VERSION",
+    "release_sequence": 1,
+    "file_size": 1,
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "mandatory": false
+  },
+  "stages": {
+    "software": {
+      "status": "pending",
+      "tested_by": "REPLACE_WITH_HUMAN_NAME",
+      "completed_at": "2026-01-01T00:00:00+00:00",
+      "evidence_file": "software-evidence.txt",
+      "evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "test_firmware": {
+      "status": "pending",
+      "tested_by": "REPLACE_WITH_HUMAN_NAME",
+      "completed_at": "2026-01-01T00:00:01+00:00",
+      "evidence_file": "test-firmware-evidence.txt",
+      "evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "vehicle": {
+      "status": "pending",
+      "tested_by": "REPLACE_WITH_HUMAN_NAME",
+      "completed_at": "2026-01-01T00:00:02+00:00",
+      "evidence_file": "vehicle-evidence.txt",
+      "evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "approval": {
+    "status": "pending",
+    "approved_by": "REPLACE_WITH_HUMAN_NAME",
+    "approved_at": "2026-01-01T00:00:03+00:00"
+  }
+}
