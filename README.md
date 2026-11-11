@@ -95,6 +95,29 @@ verwendet. Ein frischer GUI-Build traegt keine alte Akte weiter.
 
 ### GUI
 
+Einzelfreigabe vom 20.10.2026: Basic 2.2.0.2, Sequenz 3, 999440 Byte, SHA256
+`19bb3d2f0476b459854ee17de12d0c168a116c68f96f76ed1737b95c4682fa5d`
+darf laut ausdruecklicher Nutzeranweisung ohne neuen Fahrzeugtest publiziert
+werden. Die Schema-2-Akte verlangt weiterhin bestandene Software- und reale
+Basic-Pruefung; der Fahrzeugtest muss als `waived` und nicht durchgefuehrt
+ausgewiesen sein. Die Ausnahme ist im lokalen Validator exakt an dieses BIN
+gebunden und gilt nicht fuer andere Versionen, Targets, Sequenzen oder Hashes.
+Die bereits bestehende Central-Einzelfreigabe bleibt separat erhalten. Eine
+weitere Schema-2-Ausnahme bindet den Central-Initialrelease 2.2.0.5, Sequenz 7,
+`mandatory=false`. Groesse und SHA256 muessen noch auf das finale signierte BIN
+gesetzt werden; solange sie fehlen, bleibt die Ausnahme gesperrt. Die Software-
+Stufe muss bestanden sein, waehrend nicht erfolgte Test-Firmware- und Fahrzeug-
+Pruefungen ausdruecklich `waived` beziehungsweise `open` bleiben.
+
+Eine weitere, getrennte Schema-2-Einzelfreigabe erlaubt den Outdoor-Initialrelease
+1.0.0.0, Sequenz 1, 951568 Byte, SHA256
+`d7fe997090c093876dc03844636d52b39b4a7c3a8c92e0c74f760682266e1820`, mit
+`mandatory=false`. Sie gilt ausschliesslich fuer dieses BIN. Die Software-
+Nachweise muessen bestanden sein; nicht ausgefuehrte Test-Firmware- und
+Fahrzeugpruefungen bleiben `waived` beziehungsweise `open` und duerfen nicht als
+bestanden dokumentiert werden. Die Akte protokolliert die ausdrueckliche
+Nutzerfreigabe fuer diese Initialversion.
+
 Fuer den einfachen Release-Alltag gibt es jetzt auch eine GUI:
 
 ```bash
@@ -260,3 +283,11 @@ Das Tool erwartet:
   das ECDSA-Manifest und darf nicht fuer neue Produktionsreleases verwendet
   werden; Central bleibt dabei trotzdem RSA-3072-signaturpflichtig
 - die privaten Produktionsschluessel duerfen niemals nach Git oder Supabase
+
+
+Einzelfreigabe vom 30.10.2026: Outdoor 1.0.0.1, Sequenz 2, 950592 Byte,
+SHA256 `de5fc56a067412525c80b99a44b8795e3a3cc26d492ef462e0582d9e81732620`,
+`mandatory=false`, darf nach ausdrücklicher Nutzerfreigabe für die GPIO15-
+Korrektur veröffentlicht werden. Die Schema-2-Ausnahme bindet ausschließlich
+dieses Image. Softwaretests sind bestanden; Hardware-/Fahrzeugprüfungen bleiben
+ausdrücklich offen und werden nicht als bestanden ausgegeben.

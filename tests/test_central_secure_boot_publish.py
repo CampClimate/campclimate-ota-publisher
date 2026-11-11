@@ -279,12 +279,16 @@ class CentralSecureBootPublishTests(unittest.TestCase):
     def test_manifest_failure_cleans_private_artifact(self) -> None:
         calls: list[list[str]] = []
         environment = self.environment()
+        isolated_drop = self.root / "isolated-drop"
+        isolated_drop.mkdir()
         with mock.patch.dict(os.environ, environment, clear=False), mock.patch(
             "publisher._run_central_image_tool",
             side_effect=self.fake_image_tool(calls),
         ), mock.patch(
             "publisher.signing_config_from_values",
             side_effect=SigningError("test-only manifest failure"),
+        ), mock.patch(
+            "publisher.DROP_DIR", isolated_drop,
         ):
             with self.assertRaisesRegex(RuntimeError, "Firmware-Signatur"):
                 publisher.prepare_release(
@@ -297,7 +301,7 @@ class CentralSecureBootPublishTests(unittest.TestCase):
                     artifact_origin="build",
                 )
 
-        self.assertEqual(list(publisher.DROP_DIR.glob(".central-sbv2-*")), [])
+        self.assertEqual(list(isolated_drop.glob(".central-sbv2-*")), [])
 
 
 if __name__ == "__main__":
