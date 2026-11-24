@@ -17,6 +17,7 @@ from typing import Callable, Mapping
 MANIFEST_DOMAIN = "campclimate-firmware-release"
 MANIFEST_VERSION = 1
 SIGNATURE_ALGORITHM = "ecdsa-p256-sha256"
+TOUCH_TARGETS = {"touch-usbc", "touch-original"}
 KEYCHAIN_SERVICE = "de.campclimate.ota-signing"
 
 _HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -48,8 +49,8 @@ class ReleaseManifest:
             raise SigningError(
                 f"Nicht unterstuetzter Signaturalgorithmus: {self.signature_algorithm}"
             )
-        if self.target not in {"basic", "central", "outdoor"}:
-            raise SigningError("Target muss 'basic', 'central' oder 'outdoor' sein.")
+        if self.target not in {"basic", "central", "outdoor"} | TOUCH_TARGETS:
+            raise SigningError(f"Unbekanntes Firmware-Ziel: {self.target}")
         if not _VERSION_RE.fullmatch(self.version):
             raise SigningError(
                 "Version darf nur Buchstaben, Zahlen, Punkt, Unterstrich, Plus und Minus enthalten."

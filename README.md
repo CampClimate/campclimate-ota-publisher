@@ -300,3 +300,16 @@ SHA256 `de5fc56a067412525c80b99a44b8795e3a3cc26d492ef462e0582d9e81732620`,
 Korrektur veröffentlicht werden. Die Schema-2-Ausnahme bindet ausschließlich
 dieses Image. Softwaretests sind bestanden; Hardware-/Fahrzeugprüfungen bleiben
 ausdrücklich offen und werden nicht als bestanden ausgegeben.
+
+## Touch-Prüfstand
+
+Für das 2,8-Zoll-Touch gibt es getrennte Ziele für ST7789 (`touch-usbc`) und ILI9341 (`touch-original`). Im Touch-Projekt setzt ein Release-Build die Umgebungsvariablen `CC_TOUCH_RELEASE_VERSION` und `CC_TOUCH_RELEASE_SEQUENCE`. Ein normales USB-Entwicklungsimage hat Sequenz null.
+
+Ein lokales Manifest für das fertige App-Image wird mit dem konfigurierten Release-Schlüssel erzeugt und direkt mit dem öffentlichen Schlüssel geprüft:
+
+```sh
+python3 sign_touch.py firmware.bin --target touch-usbc --version 1.0.0-rc1 --sequence 1 --manifest release-manifest.json
+```
+
+Der Signierer gleicht die im Image hinterlegte Displayvariante, Version und Sequenz ab. Die erzeugte Datei dient der Übergabe an die gekoppelte Test-Central. Ein öffentlicher Rollout erfolgt separat.
+
