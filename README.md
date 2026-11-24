@@ -118,6 +118,15 @@ Fahrzeugpruefungen bleiben `waived` beziehungsweise `open` und duerfen nicht als
 bestanden dokumentiert werden. Die Akte protokolliert die ausdrueckliche
 Nutzerfreigabe fuer diese Initialversion.
 
+Eine weitere, eigenstaendige Ausnahme vom 12.11.2026 ist ausschliesslich fuer
+Central 2.2.0.6, Sequenz 20, `mandatory=false` gebunden. Das signierte BIN hat
+2.236.416 Bytes und SHA256
+`3e1633b8859a727b71392349e7f41486e833429353fd4fe5978dd9f8a51eb675`.
+Der Validator akzeptiert ausschliesslich diese Identitaet. Die Nutzerfreigabe bezieht sich auf die
+Initialfreigabe, weil noch keine Kundensysteme im Feld sind. Sie bestaetigt
+weder Test-Firmware- noch Fahrzeugtests; beide Stufen bleiben `open`. Andere
+Versionen, Sequenzen, Hashes und Releases sind nicht von dieser Ausnahme erfasst.
+
 Fuer den einfachen Release-Alltag gibt es jetzt auch eine GUI:
 
 ```bash

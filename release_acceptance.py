@@ -51,6 +51,24 @@ _CENTRAL_INITIAL_CANDIDATE = {
     "mandatory": False,
 }
 
+# Separate, one-time Central initial-release exception authorized on
+# 2026-11-12. Bound to the exact final signed BIN after cryptographic review.
+# No hardware validation is implied.
+_CENTRAL_BLE_INITIAL_EXCEPTION_ID = "2026-11-12-central-2.2.0.6-seq20-initial-release"
+_CENTRAL_BLE_INITIAL_EXCEPTION_REASON = (
+    "wir haben ja glaube ich auch eine neue Version die wir vermutlich vorher noch siognieren und in die Cloud laden müssen - "
+    "Da keine Systeme im Feld beim Kunden sind können wir dies wieder initila als aktuellste Version freigeben. "
+    "Da sollte die BLE Kommunkation überabrietet worden sein"
+)
+_CENTRAL_BLE_INITIAL_CANDIDATE = {
+    "target": "central",
+    "version": "2.2.0.6",
+    "release_sequence": 20,
+    "file_size": 2236416,
+    "sha256": "3e1633b8859a727b71392349e7f41486e833429353fd4fe5978dd9f8a51eb675",
+    "mandatory": False,
+}
+
 # Explicitly authorized Outdoor initial release. This exception is bound to
 # the exact prepared production BIN; hardware validation remains unclaimed.
 _OUTDOOR_INITIAL_EXCEPTION_ID = "2026-10-24-outdoor-1.0.0.0-seq1-initial-release"
@@ -244,6 +262,10 @@ def _validate_exception_schema2(
         candidate[key] == _CENTRAL_INITIAL_CANDIDATE[key]
         for key in ("target", "version", "release_sequence", "mandatory")
     )
+    central_ble_initial_exception = all(
+        candidate[key] == _CENTRAL_BLE_INITIAL_CANDIDATE[key]
+        for key in ("target", "version", "release_sequence", "mandatory")
+    )
     outdoor_initial_exception = candidate == _OUTDOOR_INITIAL_CANDIDATE
     outdoor_gpio15_exception = candidate == _OUTDOOR_GPIO15_CANDIDATE
     basic_exception = candidate == _BASIC_EXCEPTION_CANDIDATE
@@ -259,6 +281,10 @@ def _validate_exception_schema2(
         binding = _CENTRAL_INITIAL_CANDIDATE
         exception_id = _CENTRAL_INITIAL_EXCEPTION_ID
         exception_reason = _CENTRAL_INITIAL_EXCEPTION_REASON
+    elif central_ble_initial_exception:
+        binding = _CENTRAL_BLE_INITIAL_CANDIDATE
+        exception_id = _CENTRAL_BLE_INITIAL_EXCEPTION_ID
+        exception_reason = _CENTRAL_BLE_INITIAL_EXCEPTION_REASON
     elif basic_exception:
         binding = _BASIC_EXCEPTION_CANDIDATE
         exception_id = _BASIC_EXCEPTION_ID
